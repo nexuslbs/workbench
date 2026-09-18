@@ -448,10 +448,18 @@ export class Host implements HostApi {
       const index = raw.sources.findIndex((source) => source.id === id)
       if (index < 0) throw new Error(`no configured source with id '${id}'`)
       const unloaded: string[] = []
-      for (const entry of this.entries.values()) {
-        if (entry.discovery.source !== id || entry.state !== 'loaded') continue
-        await entry.fiber?.dispose()
-        unloaded.push(entry.discovery.name)
+      for (const entry of [...this.entries.values()]) {
+        if (entry.discovery.source !== id) continue
+        if (entry.state === 'loaded') {
+          await entry.fiber?.dispose()
+          unloaded.push(entry.discovery.name)
+        }
+        // Forget the entry too: `refresh()` below only prunes entries that are
+        // not loaded, so a disposed plugin must leave the loaded state or it
+        // would stay in the inventory forever (and keep being served).
+        entry.state = 'discovered'
+        delete entry.fiber
+        delete entry.config
       }
       const file = this.configFilePath()
       if (file === undefined) throw new Error('the host has no config file to persist the source removal to')
