@@ -17,7 +17,8 @@
     "test": "node --test test/*.test.ts"
   },
   "dependencies": {
-    "cordis": "4.0.0-rc.10"
+    "cordis": "4.0.0-rc.10",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

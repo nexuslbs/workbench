@@ -59,6 +59,13 @@ $ npm run dev -- hello otherworld
 Hello Otherworld
 ```
 
+The same boot from the YAML example config (the default lookup prefers
+`workbench.config.yml` / `.yaml` over `.json`):
+
+```bash
+npm run dev -- --config workbench.config.example.yml plugins
+```
+
 Plugin loading messages go to stderr, command output to stdout.
 
 ## CLI
@@ -69,13 +76,42 @@ Plugin loading messages go to stderr, command output to stdout.
 | `workbench plugins` | List loaded plugins, their source and their capabilities. |
 | `workbench commands` | List the registered commands (and the plugin that registered them). |
 | `workbench plugins --json` / `workbench commands --json` | Machine-readable variants. |
-| `--config <file>` | Use another config file. |
+| `--config <file>` | Use another config file; `.json`, `.yml` or `.yaml` (the extension selects the parser). |
 | `--no-external` | Skip external sources (only the core plugins load). |
 | `--help` | Usage. |
 
 With npm: `npm run dev -- <args>`.
 
-## Config (`workbench.config.json`)
+## Config (`workbench.config.yml` / `.yaml` / `.json`)
+
+The same schema is read from **JSON or YAML** - the file extension selects the
+parser (`.json` -> JSON, `.yml` / `.yaml` -> YAML; any other extension is an
+error, the core never guesses). Without `--config` the core looks for, in order,
+`workbench.config.yml`, `workbench.config.yaml`, `workbench.config.json` in the
+working directory and then next to the core; the first existing file wins and a
+missing config names all three candidates.
+
+YAML, with comments:
+
+```yaml
+# workbench.config.yml
+sources:
+  # core plugins that ship with this repository
+  - kind: path
+    id: core
+    path: ./plugins
+    external: false
+  # external plugin repository (sibling checkout by default)
+  - kind: path
+    id: workbench-plugins
+    path: ../workbench-plugins/plugins
+
+plugins:
+  hello-world: { message: Hello World }
+  hello-otherworld: { message: Hello Otherworld }
+```
+
+The equivalent JSON:
 
 ```json
 {
@@ -104,6 +140,17 @@ With npm: `npm run dev -- <args>`.
   when the config is read, and missing variables are a hard error. Secrets are
   referenced by name only - never inline them in this file.
 
+### YAML notes
+
+- Parse and validation errors name the config file (YAML parse errors also carry
+  the parser's line/column); a broken file is never silently replaced by another
+  format.
+- YAML types its scalars: unquoted `42` is a number and `true`/`false` are
+  booleans (the parser follows the YAML 1.2 core schema, so `yes`/`on` stay
+  strings). `${env:VAR}` expansion and the validation messages only treat
+  strings as strings, so **quote values that must stay strings**, e.g.
+  `message: "42"` or `message: "on"`.
+
 ## Layout
 
 ```
@@ -114,13 +161,14 @@ workbench/
     loader.ts     plugin discovery + manifest validation + import + ctx.plugin
     registry.ts   the workbench service (commands + plugins)
     sources.ts    source resolution (path + git cache)
-    config.ts     config file reading and ${env:VAR} expansion
+    config.ts     JSON/YAML config reading, default-file lookup, ${env:VAR} expansion
     types.ts      manifest / command / plugin / config types + the ctx.workbench type
   plugins/
     hello-world/  core test plugin (loaded through the plugin-source mechanism)
   test/
     kernel.test.ts  load-and-run tests, incl. CLI end to end
-  workbench.config.json
+  workbench.config.json         default config (JSON)
+  workbench.config.example.yml  the same config in YAML (for `--config`)
   docs/PLUGIN-CONTRACT.md
 ```
 
@@ -147,6 +195,11 @@ plugins are loaded (the external one with `source: workbench-plugins`), that bot
 commands produce their greeting, and that the CLI prints `Hello Otherworld`. A
 second test boots with `includeExternal: false` and asserts the external plugin
 disappears - so the suite fails when the external plugin is not loaded.
+`test/config.test.ts` covers the loader itself: YAML/JSON parity (config and
+kernel state), `${env:VAR}` expansion in a YAML config, the default-file
+resolution order (yml > yaml > json, and a json-only repo still resolving to its
+json), malformed YAML naming the file, unknown extensions and non-string scalars
+in the validation messages.
 
 ## License
 

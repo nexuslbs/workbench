@@ -108,7 +108,8 @@ in config values) and the core decides how to hand them over.
 
 ## 5. How an external source is added
 
-The core config (`workbench.config.json`) lists sources:
+The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /
+`workbench.config.yaml`; the extension selects the parser) lists sources:
 
 ```json
 {
@@ -126,6 +127,11 @@ The core config (`workbench.config.json`) lists sources:
   and then scanned like a path source (`subdir` selects the plugin directory).
 - `external: false` marks a core source; every other source is external and is
   skipped by `--no-external`.
+- Without `--config` the core looks for `workbench.config.yml`, then
+  `workbench.config.yaml`, then `workbench.config.json` in the working directory
+  (and then next to the core) and uses the first one that exists. Both formats
+  share the schema, the validation and the `${env:VAR}` expansion; YAML scalars
+  are typed, so quote values that must stay strings.
 
 There is no per-plugin registration code: dropping a plugin directory into a
 configured source is the whole wiring. The loader is directory-driven, so a new

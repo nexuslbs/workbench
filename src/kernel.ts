@@ -1,12 +1,12 @@
 import path from 'node:path'
 import { Context } from 'cordis'
-import { DEFAULT_CONFIG_FILE, readConfig } from './config.ts'
+import { findDefaultConfigFile, readConfig } from './config.ts'
 import { loadPlugins, type LoadFailure, type SourceReport } from './loader.ts'
 import { CommandRegistry } from './registry.ts'
 import type { LoadedPlugin, WorkbenchConfig } from './types.ts'
 
 export interface KernelOptions {
-  /** Config file to load (default: ./workbench.config.json). */
+  /** Config file to load (default: the first default config file in the working directory). */
   configFile?: string
   /** Pre-loaded config (used by tests instead of a file). */
   config?: WorkbenchConfig
@@ -41,7 +41,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     config = options.config
     configDir = options.configDir ?? cwd
   } else {
-    const file = options.configFile ?? path.join(cwd, DEFAULT_CONFIG_FILE)
+    const file = options.configFile ?? findDefaultConfigFile([cwd])
     const loaded = readConfig(file)
     config = loaded.config
     configDir = options.configDir ?? loaded.dir

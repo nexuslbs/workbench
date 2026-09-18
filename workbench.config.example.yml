@@ -1,0 +1,25 @@
+# Example workbench config in YAML - comments and multi-line values are allowed.
+# Run it with:  npm run dev -- --config workbench.config.example.yml plugins
+#
+# The parser is picked by extension: .yml / .yaml are parsed as YAML, .json as
+# JSON. Both formats share the schema, the validation and the ${env:VAR}
+# expansion. Without --config the core looks for workbench.config.yml, then
+# workbench.config.yaml, then workbench.config.json in the working directory.
+sources:
+  # core plugins that ship with this repository
+  - kind: path
+    id: core
+    path: ./plugins
+    external: false
+  # the external plugin repository (sibling checkout by default)
+  - kind: path
+    id: workbench-plugins
+    path: ../workbench-plugins/plugins
+
+plugins:
+  # YAML scalars must stay strings here: quote values like "yes", "on", "42",
+  # "1.0" and anything starting with a YAML indicator character (* & ! % @ ` etc).
+  hello-world:
+    message: Hello World
+  hello-otherworld:
+    message: Hello Otherworld

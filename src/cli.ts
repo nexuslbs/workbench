@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { DEFAULT_CONFIG_FILE } from './config.ts'
+import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
 import { createKernel } from './kernel.ts'
 import type { LoadedPlugin } from './types.ts'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const DEFAULT_CONFIG = path.resolve(HERE, '..', DEFAULT_CONFIG_FILE)
+/** Directory of the core package, the fallback location of the default config. */
+const CORE_DIR = path.resolve(HERE, '..')
 
 const HELP = `workbench - minimal cordis plugin host
 
@@ -16,24 +17,30 @@ Usage:
   workbench commands              list registered commands
 
 Options:
-  --config <file>  config file to use (default: ${DEFAULT_CONFIG_FILE} next to the core)
+  --config <file>  config file to use; .json, .yml or .yaml (default: the first of
+                   ${DEFAULT_CONFIG_FILES.join(', ')}
+                   in the working directory, then next to the core)
   --no-external    skip external plugin sources
   --json           machine readable output
   --help           this text
 `
 
 interface Flags {
-  configFile: string
+  configFile?: string
   includeExternal: boolean
   json: boolean
   rest: string[]
 }
 
 function parseArgs(argv: string[]): Flags {
-  const flags: Flags = { configFile: DEFAULT_CONFIG, includeExternal: true, json: false, rest: [] }
+  const flags: Flags = { includeExternal: true, json: false, rest: [] }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--config') flags.configFile = path.resolve(process.cwd(), argv[++i] ?? '')
+    if (arg === '--config') {
+      const value = argv[++i]
+      if (!value) throw new Error('--config needs a file path')
+      flags.configFile = path.resolve(process.cwd(), value)
+    }
     else if (arg === '--no-external') flags.includeExternal = false
     else if (arg === '--json') flags.json = true
     else flags.rest.push(arg)
@@ -55,7 +62,8 @@ async function main(): Promise<void> {
     return
   }
 
-  const kernel = await createKernel({ configFile: flags.configFile, includeExternal: flags.includeExternal })
+  const configFile = flags.configFile ?? findDefaultConfigFile([...new Set([process.cwd(), CORE_DIR])])
+  const kernel = await createKernel({ configFile, includeExternal: flags.includeExternal })
   try {
     if (head === 'plugins') {
       if (flags.json) {
