@@ -151,7 +151,16 @@ export function discoverPlugins(options: LoadOptions): DiscoverReport {
     const external = spec.external !== false
     if (external && !options.includeExternal) continue
 
-    const source: ResolvedSource = resolveSource(spec, options.configDir, options.cacheDir)
+    // A source that declares `auth` is fetched with the auth the CALLER resolved
+    // through the BOOTSTRAP credential set, keyed by source id (the same key
+    // `resolveSourceAuths` produces). A missing entry is NOT an anonymous retry:
+    // `resolveSource` reports the source loudly and the walk skips it.
+    const source: ResolvedSource = resolveSource(
+      spec,
+      options.configDir,
+      options.cacheDir,
+      options.sourceAuth?.get(sourceId(spec, options.configDir)),
+    )
     const sourceReport: SourceReport = { id: source.id, kind: source.kind, dir: source.dir, external, plugins: 0 }
     if (source.error || !source.dir) {
       sourceReport.error = source.error ?? 'source has no directory'

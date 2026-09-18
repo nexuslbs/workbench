@@ -23,6 +23,7 @@ import {
   resolveSourceAuth,
   resolveSourceAuths,
 } from '../src/source-auth.ts'
+import { discoverPlugins } from '../src/loader.ts'
 import { redactArgs, resolveSource } from '../src/sources.ts'
 import type { SourceSpec } from '../src/types.ts'
 
@@ -236,4 +237,44 @@ test('bootstrap set: only core providers can be selected, and a plugin id is a l
   assert.deepEqual(bootstrapCredentials({ configDir: root, providers: ['file'] }).enabled(), ['file'])
   assert.throws(() => bootstrapCredentials({ configDir: root, providers: ['vault'] }), /is not a CORE provider/)
   assert.throws(() => bootstrapCredentials({ configDir: root, providers: ['env', 'env'] }), /listed twice/)
+
+test('loader: a private git source is discovered with the auth resolved by the bootstrap set', async () => {
+  const root = tmpRoot()
+  const origin = makeRemote(root)
+  process.env.WB_TEST_SOURCE_TOKEN = TOKEN
+  const credentials = bootstrapCredentials({ configDir: root })
+  const config = { sources: [specFor(origin, { type: 'token', credential: 'WB_TEST_SOURCE_TOKEN' })] }
+  const sourceAuth = await resolveSourceAuths(config as never, { configDir: root, credentials })
+
+  const report = discoverPlugins({
+    config: config as never,
+    configDir: root,
+    cacheDir: path.join(root, 'cache'),
+    includeExternal: true,
+    sourceAuth,
+    log: () => {},
+  })
+  assert.equal(report.sources[0]?.error, undefined)
+  assert.ok(report.sources[0]?.dir !== null)
+  assert.deepEqual(
+    report.discoveries.map((discovery) => discovery.name),
+    ['hello-private'],
+  )
+  assert.equal(report.discoveries[0]?.source, 'private-local')
+
+  // The SAME walk WITHOUT the resolved auth: the source is skipped loudly and
+  // NOTHING is fetched. This is the regression the test exists for - the loader
+  // must thread the caller-resolved auth into resolveSource (a source that
+  // declares `auth` is never fetched anonymously).
+  const anonymous = discoverPlugins({
+    config: config as never,
+    configDir: root,
+    cacheDir: path.join(root, 'cache-anonymous'),
+    includeExternal: true,
+    log: () => {},
+  })
+  assert.deepEqual(anonymous.discoveries, [])
+  assert.match(anonymous.sources[0]?.error as string, /declares 'auth' but no credential was resolved/)
+  assert.equal(fs.existsSync(path.join(root, 'cache-anonymous', 'private-local')), false)
+})
 })
