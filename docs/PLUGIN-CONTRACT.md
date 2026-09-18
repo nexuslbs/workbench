@@ -102,9 +102,42 @@ Rules:
 The CLI runs a command as `workbench <name words...> [args...]`, prints the
 returned string on stdout and exits non-zero for an unknown command.
 
+## 4b. Credentials capability (`ctx.credentials`)
+
+Credentials are a **capability seam with three roles** (definition, provider,
+consumer) - see [CREDENTIALS.md](CREDENTIALS.md) for the full contract and the
+four core providers (`env`, `file`, `project-env`, `user-env`):
+
+- **Definition** (core, `src/credentials/definition.ts`, exported from
+  `src/index.ts`): the typed contract, the `credentials@1` version, and the
+  `ctx.credentials` handle. It names no provider and no backend.
+- **Provider**: an implementation of the contract. A plugin that provides one
+  declares it in its manifest - the declaration is what makes the provider
+  resolvable:
+
+  ```json
+  {
+    "name": "credentials-vault",
+    "entry": "index.ts",
+    "capabilities": [{ "id": "credentials", "version": 1, "provider": "vault" }]
+  }
+  ```
+
+  The string form (`"capabilities": ["command:hello world"]`) keeps working:
+  the capability field is additive.
+- **Consumer**: uses the capability through `ctx.credentials` (or the config
+  `${cred:NAME}` / `${secret:NAME}` references). A consumer never imports a
+  provider, and a provider never imports a consumer.
+
+Dependency direction is `Provider -> Definition <- Consumer`, enforced by
+`npm run check:seam` (see `scripts/check-seam.ts`, pinned by `test/seam.test.ts`).
+
 Secrets are referenced by name only. A plugin never receives secret values
-inline; the operator config references them (`${env:VAR}` expansion is available
-in config values) and the core decides how to hand them over.
+inline: it asks the credentials service for a reference, and the value it gets
+back is never logged, echoed or persisted. Error messages name the reference and
+the providers tried, never a value. The operator config references them
+(`${env:VAR}` and `${cred:NAME}` expansion are both available in config values)
+and the core decides how to hand them over.
 
 ## 5. How an external source is added
 

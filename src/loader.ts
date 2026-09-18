@@ -3,7 +3,15 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Context } from 'cordis'
 import { resolveSource, type ResolvedSource } from './sources.ts'
-import { MANIFEST_FILE, type PluginManifest, type LoadedPlugin, type WorkbenchConfig } from './types.ts'
+import {
+  MANIFEST_FILE,
+  normalizeCapabilities,
+  renderCapability,
+  type CapabilityDeclaration,
+  type PluginManifest,
+  type LoadedPlugin,
+  type WorkbenchConfig,
+} from './types.ts'
 
 export interface LoadFailure {
   plugin: string
@@ -35,6 +43,29 @@ export interface LoadOptions {
   /** Set false to skip external sources (`--no-external`). */
   includeExternal: boolean
   log: (message: string) => void
+  /**
+   * Called for every discovered plugin BEFORE its entry module is imported, so
+   * the core can act on the manifest declarations (the credentials provider ids
+   * a plugin claims) before the plugin registers its services.
+   */
+  declare?: (discovery: PluginDiscovery) => void
+  /** Loads only the discovered plugins this predicate accepts (two-phase loading). */
+  filter?: (discovery: PluginDiscovery) => boolean
+}
+
+/** A discovered plugin: its manifest and where it came from, before import. */
+export interface PluginDiscovery {
+  name: string
+  version: string
+  description?: string
+  /** Absolute plugin directory. */
+  dir: string
+  /** Source id the plugin was discovered in (e.g. `core`, `workbench-plugins`). */
+  source: string
+  /** True when the plugin came from a non-core (external) source. */
+  external: boolean
+  /** Manifest capabilities, structured. */
+  capabilities: CapabilityDeclaration[]
 }
 
 /** Reads and minimally validates a plugin manifest. */
@@ -50,6 +81,9 @@ export function readManifest(dir: string): PluginManifest {
   if (manifest.capabilities !== undefined && !Array.isArray(manifest.capabilities)) {
     throw new Error(`manifest ${file}: 'capabilities' must be an array`)
   }
+  // Validates both capability forms (the short string form and the structured
+  // declaration form credential providers use); the manifest stays additive.
+  normalizeCapabilities(manifest.capabilities, `manifest ${file}`)
   return manifest
 }
 
@@ -98,12 +132,24 @@ export async function loadPlugins(ctx: Context, options: LoadOptions): Promise<L
 
     for (const dir of discoverPluginDirs(source.dir)) {
       let manifest: PluginManifest
+      let discovery: PluginDiscovery
       try {
         manifest = readManifest(dir)
+        discovery = {
+          name: manifest.name,
+          version: manifest.version,
+          description: manifest.description,
+          dir,
+          source: source.id,
+          external,
+          capabilities: normalizeCapabilities(manifest.capabilities, `manifest ${path.join(dir, MANIFEST_FILE)}`),
+        }
       } catch (error) {
         report.failures.push({ plugin: path.basename(dir), source: source.id, error: (error as Error).message })
         continue
       }
+      if (options.filter && !options.filter(discovery)) continue
+      options.declare?.(discovery)
       try {
         const file = path.resolve(dir, manifest.entry)
         if (!fs.existsSync(file)) throw new Error(`entry module not found: ${file}`)
@@ -119,7 +165,8 @@ export async function loadPlugins(ctx: Context, options: LoadOptions): Promise<L
           name: manifest.name,
           version: manifest.version,
           description: manifest.description,
-          capabilities: manifest.capabilities ?? [],
+          capabilities: discovery.capabilities.map(renderCapability),
+          capabilityList: discovery.capabilities,
           source: source.id,
           dir,
           external,

@@ -15,6 +15,7 @@
     "dev": "node src/cli.ts",
     "serve": "node src/cli.ts serve",
     "typecheck": "tsc -p tsconfig.json",
+    "check:seam": "node scripts/check-seam.ts",
     "test": "node --test test/*.test.ts"
   },
   "dependencies": {

@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { parse as parseYaml } from 'yaml'
+import { parseCredentialRef, refLabel, type CredentialRef, type CredentialResolution } from './credentials/definition.ts'
 import type { WorkbenchConfig } from './types.ts'
 
 /**
@@ -191,4 +192,98 @@ function exportedConfig(expanded: object): WorkbenchConfig {
     ...(root as unknown as WorkbenchConfig),
     sources: root.sources as WorkbenchConfig['sources'],
   }
+}
+
+/**
+ * Config values may reference a CREDENTIAL: `${cred:NAME}` or `${secret:NAME}`
+ * (also `${cred:SCOPE/NAME}`). The reference is resolved through the credentials
+ * SERVICE - this loader is a CONSUMER: it knows the definition and never a
+ * provider. `${env:VAR}` keeps working exactly as before (it is expanded earlier
+ * and matches a different pattern), so both kinds of reference can appear in one
+ * file.
+ */
+const CRED_REF_SOURCE = '\\$\\{(cred|secret):([^}]*)\\}'
+
+/** The part of the credentials service the config consumer needs (provider agnostic). */
+export interface CredentialResolver {
+  resolve(ref: CredentialRef): Promise<CredentialResolution | undefined>
+  /** Enabled provider ids, in precedence order (for error messages). */
+  enabled(): string[]
+}
+
+export interface CredentialExpansionOptions {
+  /** Default scope for references that do not carry one (`credentials.scope`). */
+  scope?: string
+}
+
+/** The `${` + kind + `:}` prefix, used in messages without confusing nesting. */
+function refPrefix(kind: string): string {
+  return '${' + kind + ':}'
+}
+
+/**
+ * Expands the credential references of ONE string. An unresolvable reference is
+ * an error naming the REFERENCE and the providers tried - never a value; and a
+ * resolved value never appears in any message this loader produces.
+ */
+export async function expandCredentialRefs(
+  value: string,
+  resolver: CredentialResolver,
+  options: CredentialExpansionOptions = {},
+): Promise<string> {
+  const pattern = new RegExp(CRED_REF_SOURCE, 'g')
+  let result = ''
+  let last = 0
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(value)) !== null) {
+    const kind = match[1] ?? 'cred'
+    const body = (match[2] ?? '').trim()
+    if (body.length === 0) throw new Error(`config: an empty '${refPrefix(kind)}' credential reference is not allowed`)
+    const parsed = parseCredentialRef(body)
+    let resolution = await resolver.resolve(parsed)
+    // The configured default scope (`credentials.scope`) is a FALLBACK: an
+    // unscoped reference is first looked up unscoped and only then in the
+    // default scope, so `${cred:NAME}` keeps working for a top-level credential.
+    const fallback: CredentialRef | undefined =
+      resolution === undefined && parsed.scope === undefined && options.scope
+        ? { name: parsed.name, scope: options.scope }
+        : undefined
+    if (fallback) resolution = await resolver.resolve(fallback)
+    if (!resolution) {
+      const providers = resolver.enabled()
+      const tried = fallback ? ` (the default scope '${fallback.scope}' was tried as well)` : ''
+      throw new Error(
+        `config: credential '${refLabel(parsed)}' could not be resolved by the enabled provider(s) ` +
+          `${providers.length ? providers.join(', ') : '(none)'}${tried}; check the credential name and the 'credentials' section of the config`,
+      )
+    }
+    result += value.slice(last, match.index) + resolution.value
+    last = match.index + match[0].length
+  }
+  return result + value.slice(last)
+}
+
+/**
+ * Recursively expands `${cred:NAME}` / `${secret:NAME}` references through the
+ * credentials service. Returns a NEW value; the input is never mutated.
+ */
+export async function expandCredentialRefsDeep(
+  value: unknown,
+  resolver: CredentialResolver,
+  options: CredentialExpansionOptions = {},
+): Promise<unknown> {
+  if (typeof value === 'string') return expandCredentialRefs(value, resolver, options)
+  if (Array.isArray(value)) {
+    const items: unknown[] = []
+    for (const item of value) items.push(await expandCredentialRefsDeep(item, resolver, options))
+    return items
+  }
+  if (value !== null && typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      result[key] = await expandCredentialRefsDeep(item, resolver, options)
+    }
+    return result
+  }
+  return value
 }

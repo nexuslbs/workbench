@@ -167,6 +167,30 @@ entry there):
   when the config is read, and missing variables are a hard error. Secrets are
   referenced by name only - never inline them in this file.
 
+### Credentials
+
+Workbench serves credentials through a three-role capability seam: a **Service
+Definition** (the contract, in the core), one or more **Service Providers**
+(implementations), and **Consumers** (config values, the CLI, plugins). The four
+core providers are `env`, `file`, `project-env` and `user-env`; any further
+provider is an external plugin. Full description: [docs/CREDENTIALS.md](docs/CREDENTIALS.md).
+
+Config values may reference a credential by NAME, resolved through the
+credentials service:
+
+```yaml
+credentials:
+  providers: [env, file]   # enabled providers, in precedence order
+
+plugins:
+  hello-world:
+    message: "token is ${cred:DEPLOY_TOKEN}"   # or ${secret:DEPLOY_TOKEN}
+```
+
+Providers are selected by configuration only: swapping one is a config edit.
+Credential values are never logged, printed or persisted - the CLI masks them
+and errors name the reference, never the value.
+
 ### YAML notes
 
 - Parse and validation errors name the config file (YAML parse errors also carry
@@ -184,6 +208,7 @@ entry there):
 workbench/
   src/
     cli.ts        CLI entrypoint (npm run dev)
+    credentials/  the credentials capability: definition (contract) + 4 core providers
     kernel.ts     boot: cordis root context + workbench service + load
     loader.ts     plugin discovery + manifest validation + import + ctx.plugin
     registry.ts   the workbench service (commands + plugins)

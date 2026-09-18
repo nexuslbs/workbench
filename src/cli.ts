@@ -3,6 +3,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
+import { CREDENTIALS_CONTRACT, parseCredentialRef, refLabel } from './credentials/definition.ts'
 import { createKernel, type Kernel } from './kernel.ts'
 import type { LoadedPlugin } from './types.ts'
 
@@ -23,6 +24,13 @@ Usage:
   workbench <command> [args...]   run a command registered by a plugin
   workbench plugins               list loaded plugins and their sources
   workbench commands              list registered commands
+  workbench credentials providers list the credentials providers (enabled / registered)
+  workbench credentials list      list the credential names the enabled providers answer
+  workbench credentials resolve <NAME[|SCOPE/NAME]>
+                                  resolve one credential through the credentials
+                                  service (the VALUE is masked, never printed)
+  workbench credentials explain <NAME[|SCOPE/NAME]>
+                                  show which providers tried and which one answered
 
 Options:
   --config <file>  config file to use; .json, .yml or .yaml (default: the first of
@@ -110,6 +118,88 @@ function summaryLine(kernel: Kernel): string {
   return `workbench: ${kernel.plugins.length} plugin(s) loaded (${core} core, ${kernel.plugins.length - core} external)`
 }
 
+/** Credential VALUES are never printed: every output masks them. */
+const MASKED = '****'
+
+function credentialsLines(kernel: Kernel, json: boolean): string {
+  // The CLI is a CONSUMER of the capability: it goes through the typed handle
+  // `ctx.credentials` and never touches a provider module.
+  const credentials = kernel.ctx.credentials
+  const providers = credentials.providers()
+  const enabled = credentials.enabled()
+  if (json) {
+    return JSON.stringify({ contract: CREDENTIALS_CONTRACT, enabled, providers }, null, 2)
+  }
+  const lines = [`credentials: ${providers.length} provider(s) declared, ${enabled.length} enabled (${CREDENTIALS_CONTRACT})`]
+  for (const provider of providers) {
+    const state = `${provider.enabled ? 'enabled' : 'disabled'}${provider.registered ? '' : ', not-registered'}`
+    const origin = provider.external ? `external:${provider.source}` : provider.source
+    lines.push(`  ${provider.id}  ${provider.contract}  [${state}]  declared by ${provider.plugin} (${origin})${provider.describe ? `  - ${provider.describe}` : ''}`)
+  }
+  lines.push(`resolution order: ${enabled.length ? enabled.join(' -> ') : '(none)'}`)
+  return lines.join('\n')
+}
+
+/** `workbench credentials ...` - the non-config CONSUMER of the capability. */
+async function credentialsCommand(kernel: Kernel, flags: Flags): Promise<void> {
+  const [sub, ...rest] = flags.rest.slice(1)
+  const credentials = kernel.ctx.credentials
+
+  if (sub === undefined || sub === 'providers') {
+    process.stdout.write(credentialsLines(kernel, flags.json) + '\n')
+    return
+  }
+
+  if (sub === 'list') {
+    const names = await credentials.list()
+    if (flags.json) {
+      process.stdout.write(JSON.stringify({ contract: CREDENTIALS_CONTRACT, enabled: credentials.enabled(), names }, null, 2) + '\n')
+      return
+    }
+    process.stdout.write(names.length ? names.map((name) => `${name}\n`).join('') : 'no credential names available\n')
+    return
+  }
+
+  if (sub === 'resolve' || sub === 'explain') {
+    const spec = rest[0]
+    if (!spec) throw new Error(`credentials ${sub}: needs a credential reference (NAME or SCOPE/NAME)`)
+    const ref = parseCredentialRef(spec)
+    if (sub === 'explain') {
+      const trace = await credentials.explain(ref)
+      if (flags.json) {
+        process.stdout.write(JSON.stringify({ contract: CREDENTIALS_CONTRACT, ...trace }, null, 2) + '\n')
+        return
+      }
+      process.stdout.write(`credential '${refLabel(ref)}': ${trace.resolvedBy ? `resolved by '${trace.resolvedBy}'` : 'not resolved'}\n`)
+      for (const attempt of trace.attempts) {
+        process.stdout.write(`  ${attempt.provider}: ${attempt.status}${attempt.error ? ` (${attempt.error})` : ''}\n`)
+      }
+      return
+    }
+    const resolution = await credentials.resolve(ref)
+    if (!resolution) {
+      process.stderr.write(
+        `credential '${refLabel(ref)}' is not resolved by the enabled provider(s) ` +
+          `${credentials.enabled().join(', ') || '(none)'}; check the name and the 'credentials' section of the config\n`,
+      )
+      process.exitCode = 1
+      return
+    }
+    if (flags.json) {
+      process.stdout.write(
+        JSON.stringify({ contract: CREDENTIALS_CONTRACT, name: refLabel(ref), provider: resolution.provider, value: MASKED }, null, 2) + '\n',
+      )
+      return
+    }
+    process.stdout.write(
+      `credential '${refLabel(ref)}' resolved by provider '${resolution.provider}' (${resolution.contract}): ${MASKED}\n`,
+    )
+    return
+  }
+
+  throw new Error(`unknown credentials subcommand '${sub}' (expected providers, list, resolve or explain)`)
+}
+
 /**
  * Long-running entrypoint used by the compose service: boots the kernel, serves
  * a tiny status endpoint (`GET /health` -> the loaded plugins and sources) and
@@ -152,6 +242,7 @@ async function serve(kernel: Kernel, port: number): Promise<void> {
   process.stdout.write(summaryLine(kernel) + '\n')
   for (const source of kernel.sources) process.stdout.write(describeSource(source) + '\n')
   for (const plugin of kernel.plugins) process.stdout.write(`  ${describePlugin(plugin)}\n`)
+  process.stdout.write(credentialsLines(kernel, false) + '\n')
   for (const failure of kernel.failures) process.stdout.write(`  failed ${failure.plugin} (${failure.source}): ${failure.error}\n`)
 
   const heartbeat = setInterval(() => {
@@ -212,6 +303,11 @@ async function main(): Promise<void> {
       for (const command of commands.sort((a, b) => a.name.localeCompare(b.name))) {
         process.stdout.write(`${command.name}${command.description ? `  ${command.description}` : ''}${command.plugin ? `  [${command.plugin}]` : ''}\n`)
       }
+      return
+    }
+
+    if (head === 'credentials') {
+      await credentialsCommand(kernel, flags)
       return
     }
 
