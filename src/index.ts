@@ -1,0 +1,6 @@
+export { createKernel, type Kernel, type KernelOptions } from './kernel.ts'
+export { CommandRegistry } from './registry.ts'
+export { readManifest, discoverPluginDirs, loadPlugins, type LoadReport, type LoadFailure } from './loader.ts'
+export { readConfig, expandEnvDeep } from './config.ts'
+export { resolveSource } from './sources.ts'
+export * from './types.ts'

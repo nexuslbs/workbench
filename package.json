@@ -1,0 +1,26 @@
+{
+  "name": "workbench-core",
+  "version": "0.1.0",
+  "description": "workbench core - a minimal cordis (Node/TypeScript) kernel that discovers, loads and runs plugins",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "workbench": "./src/cli.ts"
+  },
+  "scripts": {
+    "dev": "node src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "cordis": "4.0.0-rc.10"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.8.2"
+  }
+}

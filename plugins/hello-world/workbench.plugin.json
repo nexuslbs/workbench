@@ -1,0 +1,13 @@
+{
+  "name": "hello-world",
+  "version": "0.1.0",
+  "description": "Core test plugin: registers the 'hello world' command",
+  "entry": "index.ts",
+  "capabilities": ["command:hello world"],
+  "config": {
+    "type": "object",
+    "properties": {
+      "message": { "type": "string", "default": "Hello World" }
+    }
+  }
+}
