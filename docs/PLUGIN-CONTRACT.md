@@ -295,7 +295,7 @@ Contract:
   resolution happens before plugin discovery. See `docs/CREDENTIALS.md`.
 - `type: token` (default) sends the value as a basic-auth `http.extraheader`;
   `type: github-app` treats the value as an App PRIVATE KEY (PEM) and mints a
-  short-lived installation token (RS256 JWT -> `POST /app/installations/{id}/access_token`).
+  short-lived installation token (RS256 JWT -> `POST /app/installations/{id}/access_tokens`).
 - The credential is TRANSIENT: `-c credential.helper=` plus
   `-c http.extraheader=...` on that single git command; the checkout's
   `.git/config` keeps the plain configured url, no credential file is written, and

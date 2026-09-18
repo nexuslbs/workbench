@@ -14,7 +14,7 @@
  *   installation token minted elsewhere, any HTTPS token),
  * - `github-app`: the credential value is a GitHub App PRIVATE KEY (PEM). A
  *   short-lived installation access token is minted from it with an RS256 JWT
- *   (`POST {apiBase}/app/installations/{installationId}/access_token`, the
+ *   (`POST {apiBase}/app/installations/{installationId}/access_tokens`, the
  *   documented GitHub App REST flow), so the operator version NOTHING and no
  *   long-lived token exists. Tokens expire after ~1h and are cached in MEMORY
  *   with a safety skew: a long-running serve mints a fresh token on its next
@@ -113,7 +113,7 @@ export interface GitHubAppTokenOptions {
 
 /**
  * Mints (or reuses a cached) GitHub App installation access token:
- * RS256 JWT -> `POST /app/installations/{installation_id}/access_token`
+ * RS256 JWT -> `POST /app/installations/{installation_id}/access_tokens`
  * (Accept: application/vnd.github+json, X-GitHub-Api-Version: 2022-11-28),
  * which answers `{ "token": "ghs_...", "expires_at": "<ISO>" }`.
  */
@@ -130,7 +130,7 @@ export async function githubAppInstallationToken(options: GitHubAppTokenOptions)
   const doFetch = options.fetchImpl ?? fetch
   let response: Response
   try {
-    response = await doFetch(`${apiBase}/app/installations/${installationId}/access_token`, {
+    response = await doFetch(`${apiBase}/app/installations/${installationId}/access_tokens`, {
       method: 'POST',
       headers: {
         accept: 'application/vnd.github+json',

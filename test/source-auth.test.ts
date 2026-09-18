@@ -201,7 +201,7 @@ test('github-app: RS256 JWT + installation token minted through the documented R
   let calls = 0
   const fetchImpl = (async (url: string | URL, init: RequestInit) => {
     calls += 1
-    assert.match(String(url), /\/app\/installations\/138119822\/access_token$/)
+    assert.match(String(url), /\/app\/installations\/138119822\/access_tokens$/)
     const headers = (init.headers ?? {}) as Record<string, string>
     assert.match(headers.authorization as string, /^Bearer eyJ/)
     return new Response(JSON.stringify({ token: 'ghs_fakeInstallationToken', expires_at: new Date(Date.now() + 3600_000).toISOString() }), {

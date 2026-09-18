@@ -343,7 +343,7 @@ sources:
 - `type: github-app`: the value is a GitHub App PRIVATE KEY (PEM). A short-lived
   installation access token is minted through the documented REST flow: an RS256
   JWT (`iat` = now-60s, `exp` = now+9min, `iss` = app id) is sent as
-  `Authorization: Bearer <jwt>` to `POST {apiBase}/app/installations/{installationId}/access_token`
+  `Authorization: Bearer <jwt>` to `POST {apiBase}/app/installations/{installationId}/access_tokens`
   (`Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`),
   which answers `{ "token": "ghs_...", "expires_at": "<ISO>" }`. Installation
   tokens expire after ~1h; the minted token is cached IN MEMORY with a 5 minute
