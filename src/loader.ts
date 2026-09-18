@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { Context } from 'cordis'
+import type { Context, Fiber } from 'cordis'
+import { markApplying } from './attribution.ts'
 import { resolveSource, type ResolvedSource } from './sources.ts'
 import {
   MANIFEST_FILE,
@@ -32,6 +33,16 @@ export interface LoadReport {
   plugins: LoadedPlugin[]
   failures: LoadFailure[]
   sources: SourceReport[]
+  /** Every plugin discovered in the configured sources, loaded or not. */
+  discoveries: PluginDiscovery[]
+  /** Names of discovered plugins the config disables (`plugins.<name>.disabled`). */
+  disabled: string[]
+  /**
+   * The cordis fiber of every LOADED plugin, keyed by plugin name. Kept out of
+   * {@link LoadedPlugin} on purpose: a fiber is a live object and must never end
+   * up in JSON output.
+   */
+  fibers: Map<string, Fiber>
 }
 
 export interface LoadOptions {
@@ -66,6 +77,13 @@ export interface PluginDiscovery {
   external: boolean
   /** Manifest capabilities, structured. */
   capabilities: CapabilityDeclaration[]
+}
+
+/** What one source walk found: the report plus the plugins discovered in it. */
+export interface DiscoverReport {
+  sources: SourceReport[]
+  discoveries: PluginDiscovery[]
+  failures: LoadFailure[]
 }
 
 /** Reads and minimally validates a plugin manifest. */
@@ -109,13 +127,18 @@ function normalizeExport(exported: unknown, manifest: PluginManifest, file: stri
   return { ...plugin, name: manifest.name }
 }
 
+/** True when the config disables a plugin (`plugins.<name>.disabled: true`). */
+export function isDisabled(config: WorkbenchConfig, name: string): boolean {
+  return config.plugins?.[name]?.disabled === true
+}
+
 /**
- * Discovers, imports and loads every plugin of every configured source into the
- * given cordis context. A failing plugin is reported, never fatal.
+ * Walks every configured source and reports the plugins it holds, WITHOUT
+ * importing anything. This is the discovery half of {@link loadPlugins} and the
+ * read path the host API reuses to refresh its view after a config change.
  */
-export async function loadPlugins(ctx: Context, options: LoadOptions): Promise<LoadReport> {
-  const report: LoadReport = { plugins: [], failures: [], sources: [] }
-  const workbench = (ctx as unknown as { workbench: { attribute(plugin: string, known: Set<string>): void; commandNames(): Set<string> } }).workbench
+export function discoverPlugins(options: LoadOptions): DiscoverReport {
+  const report: DiscoverReport = { sources: [], discoveries: [], failures: [] }
 
   for (const spec of options.config.sources) {
     const external = spec.external !== false
@@ -148,43 +171,106 @@ export async function loadPlugins(ctx: Context, options: LoadOptions): Promise<L
         report.failures.push({ plugin: path.basename(dir), source: source.id, error: (error as Error).message })
         continue
       }
-      if (options.filter && !options.filter(discovery)) continue
-      options.declare?.(discovery)
-      try {
-        const file = path.resolve(dir, manifest.entry)
-        if (!fs.existsSync(file)) throw new Error(`entry module not found: ${file}`)
-        const known = workbench.commandNames()
-        const mod = (await import(pathToFileURL(file).href)) as unknown
-        const plugin = normalizeExport(mod, manifest, file)
-        // Plugin objects are user supplied: cordis' generic plugin signature cannot
-        // be expressed for a dynamically imported module, so the context call is cast.
-        const plug = ctx as unknown as { plugin(plugin: unknown, config?: unknown): unknown }
-        await plug.plugin(plugin, options.config.plugins?.[manifest.name] ?? {})
-        workbench.attribute(manifest.name, known)
-        const loaded: LoadedPlugin = {
-          name: manifest.name,
-          version: manifest.version,
-          description: manifest.description,
-          capabilities: discovery.capabilities.map(renderCapability),
-          capabilityList: discovery.capabilities,
-          source: source.id,
-          dir,
-          external,
-        }
-        report.plugins.push(loaded)
-        sourceReport.plugins += 1
-        options.log(`loaded plugin ${manifest.name}@${manifest.version} from ${source.id} (${external ? 'external' : 'core'})`)
-      } catch (error) {
-        let message = (error as Error).message ?? String(error)
-        if (message.includes('without inject')) {
-          message += ` - a plugin that uses the core service must declare inject: ['workbench'] in its entry module`
-        }
-        report.failures.push({ plugin: manifest.name, source: source.id, error: message })
-        options.log(`plugin ${manifest.name} from ${source.id} failed: ${message}`)
-      }
+      report.discoveries.push(discovery)
+      sourceReport.plugins += 1
     }
     report.sources.push(sourceReport)
   }
 
+  return report
+}
+
+/**
+ * Imports and loads ONE discovered plugin into the context, attributing its
+ * registrations to it, and returns the {@link LoadedPlugin} plus its fiber.
+ *
+ * This is the write half of the loader, and the single place a plugin is
+ * instantiated: the boot ({@link loadPlugins}) and every host action (load /
+ * enable / retry / reload) go through it, so a UI-driven mutation is the same
+ * operation as a boot-time load.
+ */
+export async function loadDiscovered(
+  ctx: Context,
+  discovery: PluginDiscovery,
+  pluginConfig: Record<string, unknown>,
+  log: (message: string) => void,
+): Promise<{ plugin: LoadedPlugin; fiber: Fiber }> {
+  const workbench = (
+    ctx as unknown as { workbench: { attribute(plugin: string, known: Set<string>): void; commandNames(): Set<string> } }
+  ).workbench
+  const file = path.resolve(discovery.dir, readManifest(discovery.dir).entry)
+  if (!fs.existsSync(file)) throw new Error(`entry module not found: ${file}`)
+  const known = workbench.commandNames()
+  const mod = (await import(pathToFileURL(file).href)) as unknown
+  const plugin = normalizeExport(mod, { ...(readManifest(discovery.dir) as PluginManifest) }, file)
+  // Plugin objects are user supplied: cordis' generic plugin signature cannot be
+  // expressed for a dynamically imported module, so the context call is cast.
+  const plug = ctx as unknown as { plugin(plugin: unknown, config?: unknown): Fiber & PromiseLike<Fiber> }
+  const restore = markApplying(discovery.name)
+  let fiber: Fiber
+  try {
+    fiber = await plug.plugin(plugin, pluginConfig)
+  } finally {
+    restore()
+  }
+  workbench.attribute(discovery.name, known)
+  const loaded: LoadedPlugin = {
+    name: discovery.name,
+    version: discovery.version,
+    description: discovery.description,
+    capabilities: discovery.capabilities.map(renderCapability),
+    capabilityList: discovery.capabilities,
+    source: discovery.source,
+    dir: discovery.dir,
+    external: discovery.external,
+  }
+  log(`loaded plugin ${discovery.name}@${discovery.version} from ${discovery.source} (${discovery.external ? 'external' : 'core'})`)
+  return { plugin: loaded, fiber }
+}
+
+/**
+ * Discovers, imports and loads every plugin of every configured source into the
+ * given cordis context. A failing plugin is reported, never fatal. A plugin the
+ * config disables (`plugins.<name>.disabled: true`) is reported as disabled and
+ * is NOT imported.
+ */
+export async function loadPlugins(ctx: Context, options: LoadOptions): Promise<LoadReport> {
+  const found = discoverPlugins(options)
+  const report: LoadReport = {
+    plugins: [],
+    failures: [...found.failures],
+    sources: found.sources,
+    discoveries: found.discoveries,
+    disabled: [],
+    fibers: new Map<string, Fiber>(),
+  }
+  const counts = new Map<string, number>()
+
+  for (const discovery of found.discoveries) {
+    if (options.filter && !options.filter(discovery)) continue
+    options.declare?.(discovery)
+    const pluginConfig = { ...(options.config.plugins?.[discovery.name] ?? {}) }
+    if (pluginConfig.disabled === true) {
+      report.disabled.push(discovery.name)
+      options.log(`plugin ${discovery.name} is disabled in the config, not loaded`)
+      continue
+    }
+    delete pluginConfig.disabled
+    try {
+      const { plugin, fiber } = await loadDiscovered(ctx, discovery, pluginConfig, options.log)
+      report.plugins.push(plugin)
+      report.fibers.set(discovery.name, fiber)
+      counts.set(discovery.source, (counts.get(discovery.source) ?? 0) + 1)
+    } catch (error) {
+      let message = (error as Error).message ?? String(error)
+      if (message.includes('without inject')) {
+        message += ` - a plugin that uses the core service must declare inject: ['workbench'] in its entry module`
+      }
+      report.failures.push({ plugin: discovery.name, source: discovery.source, error: message })
+      options.log(`plugin ${discovery.name} from ${discovery.source} failed: ${message}`)
+    }
+  }
+
+  report.sources = report.sources.map((source) => ({ ...source, plugins: counts.get(source.id) ?? 0 }))
   return report
 }

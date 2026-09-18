@@ -96,11 +96,32 @@ Environment (all optional):
 | `WORKBENCH_PORT` | Port of the `serve` status endpoint (default `12347`); `--port` wins. |
 | `WORKBENCH_CACHE_DIR` | Where `git` plugin sources are checked out (default `<config dir>/.workbench/sources`). |
 
+## Web UI (`web`)
+
+`workbench web` (or `npm run web`) boots the kernel and starts a browser UI on
+`127.0.0.1:12348` by default. The core serves bytes and routes them; every page
+comes from a plugin through the `ctx.web` seam (see
+[docs/PLUGIN-CONTRACT.md](docs/PLUGIN-CONTRACT.md) section 4c). With no UI
+plugin configured the server still boots and serves the empty shell.
+
+```console
+$ npm run web -- --port 12348
+workbench: web UI on http://127.0.0.1:12348 (config <path>)
+```
+
+- Bind: `--host` / `--port` flag, then `$WORKBENCH_WEB_HOST` / `$WORKBENCH_WEB_PORT`,
+  then the `web:` section of the config, then `127.0.0.1:12348`.
+- `workbench serve` (the service mode) starts the SAME listener in the same
+  process when the config sets `web.enabled: true`.
+- No auth this round: the default bind is loopback on purpose. Binding a
+  non-loopback host exposes the UI to everyone who can reach it.
+
 ## CLI
 
 | Command | Description |
 | --- | --- |
-| `workbench serve` | Boot the plugins and keep running (service mode; status endpoint on `--port` / `WORKBENCH_PORT`, default 12347). |
+| `workbench serve` | Boot the plugins and keep running (service mode; status endpoint on `--port` / `WORKBENCH_PORT`, default 12347). With `web.enabled: true` the same process also starts the Web UI. |
+| `workbench web` | Boot the plugins and serve the plugin-composed Web UI (default `127.0.0.1:12348`). |
 | `workbench <command> [args...]` | Run the command registered by a plugin (longest match wins, the rest becomes args). |
 | `workbench plugins` | List loaded plugins, their source and their capabilities. |
 | `workbench commands` | List the registered commands (and the plugin that registered them). |

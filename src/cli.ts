@@ -6,6 +6,7 @@ import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
 import { CREDENTIALS_CONTRACT, parseCredentialRef, refLabel } from './credentials/definition.ts'
 import { createKernel, type Kernel } from './kernel.ts'
 import type { LoadedPlugin } from './types.ts'
+import { DEFAULT_WEB_HOST, DEFAULT_WEB_PORT } from './web/definition.ts'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** Directory of the core package, the fallback location of the default config. */
@@ -20,7 +21,10 @@ const HEARTBEAT_MS = 60_000
 const HELP = `workbench - minimal cordis plugin host
 
 Usage:
-  workbench serve [--port <n>]    boot the plugins and keep running (service mode)
+  workbench serve [--port <n>]    boot the plugins and keep running (service mode;
+                                  also serves the Web UI when the config enables it)
+  workbench web [--host <h>] [--port <n>]
+                                  serve the browser UI and keep running
   workbench <command> [args...]   run a command registered by a plugin
   workbench plugins               list loaded plugins and their sources
   workbench commands              list registered commands
@@ -36,7 +40,10 @@ Options:
   --config <file>  config file to use; .json, .yml or .yaml (default: the first of
                    ${DEFAULT_CONFIG_FILES.join(', ')}
                    in the working directory, then next to the core)
-  --port <n>       serve only: status endpoint port (default: $WORKBENCH_PORT or ${DEFAULT_PORT})
+  --port <n>       serve: status endpoint port (default: $WORKBENCH_PORT or ${DEFAULT_PORT});
+                   web: Web UI port (default: $WORKBENCH_WEB_PORT, the config, else ${DEFAULT_WEB_PORT})
+  --host <h>       Web UI listener host (default: $WORKBENCH_WEB_HOST, the config, else ${DEFAULT_WEB_HOST})
+  --web-port <n>   serve only: Web UI port when the config enables the UI
   --no-external    skip external plugin sources
   --json           machine readable output
   --help           this text
@@ -45,6 +52,9 @@ Environment:
   CONFIG_FILE      config file to use when --config is not given; empty/unset
                    falls back to the default config file lookup described above
   WORKBENCH_PORT   serve only: status endpoint port (default: ${DEFAULT_PORT})
+  WORKBENCH_WEB_HOST / WORKBENCH_WEB_PORT
+                   Web UI listener when the config enables it; the default host is
+                   ${DEFAULT_WEB_HOST} (loopback - the UI has NO auth)
   WORKBENCH_CACHE_DIR  where git plugin sources are checked out
                    (default: <config dir>/.workbench/sources)
 `
@@ -54,6 +64,10 @@ interface Flags {
   includeExternal: boolean
   json: boolean
   port?: number
+  /** `--host`: the Web UI listener host. */
+  host?: string
+  /** `--web-port`: the Web UI port when `serve` starts it (the status port keeps `--port`). */
+  webPort?: number
   rest: string[]
 }
 
@@ -71,6 +85,17 @@ function parseArgs(argv: string[]): Flags {
       const port = Number(value)
       if (!value || !Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`--port needs a port number (0-65535), got ${value ?? '(none)'}`)
       flags.port = port
+    }
+    else if (arg === '--host') {
+      const value = argv[++i]
+      if (!value) throw new Error('--host needs a host name or address')
+      flags.host = value
+    }
+    else if (arg === '--web-port') {
+      const value = argv[++i]
+      const webPort = Number(value)
+      if (!value || !Number.isInteger(webPort) || webPort < 0 || webPort > 65535) throw new Error(`--web-port needs a port number (0-65535), got ${value ?? '(none)'}`)
+      flags.webPort = webPort
     }
     else if (arg === '--no-external') flags.includeExternal = false
     else if (arg === '--json') flags.json = true
@@ -101,6 +126,27 @@ function resolvePort(flags: Flags): number {
     return port
   }
   return DEFAULT_PORT
+}
+
+/**
+ * Web host resolution order: `--host`, `WORKBENCH_WEB_HOST`, the config, then
+ * the loopback default. The default is deliberate: this round has no auth, so
+ * exposing the UI to another machine must be an explicit act.
+ */
+function resolveWebHost(explicit: string | undefined, fromConfig: string | undefined): string {
+  return explicit ?? process.env.WORKBENCH_WEB_HOST?.trim() ?? fromConfig?.trim() ?? DEFAULT_WEB_HOST
+}
+
+/** Web port resolution order: `--port`/`--web-port`, `WORKBENCH_WEB_PORT`, the config, then the default. */
+function resolveWebPort(explicit: number | undefined, fromConfig: number | undefined): number {
+  if (explicit !== undefined) return explicit
+  const fromEnv = process.env.WORKBENCH_WEB_PORT?.trim()
+  if (fromEnv) {
+    const port = Number(fromEnv)
+    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`WORKBENCH_WEB_PORT must be a port number (0-65535), got '${fromEnv}'`)
+    return port
+  }
+  return fromConfig ?? DEFAULT_WEB_PORT
 }
 
 function describePlugin(plugin: LoadedPlugin): string {
@@ -206,7 +252,20 @@ async function credentialsCommand(kernel: Kernel, flags: Flags): Promise<void> {
  * stays up until SIGINT/SIGTERM. Keeping the process alive is the whole point -
  * a container that only sleeps would report `Up` while hosting nothing.
  */
-async function serve(kernel: Kernel, port: number): Promise<void> {
+async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> {
+  // The Web UI attaches to THIS process: `serve` is the single long-running
+  // entrypoint of the service, so when the config enables the UI the core web
+  // provider starts here too (its own listener; the status endpoint and its
+  // port are untouched). One process, two listeners.
+  const webConfig = kernel.config.web ?? {}
+  let webServer: Awaited<ReturnType<Kernel['startWeb']>> | undefined
+  if (webConfig.enabled === true) {
+    webServer = await kernel.startWeb({
+      host: resolveWebHost(flags.host, webConfig.host),
+      port: resolveWebPort(flags.webPort, webConfig.port),
+    })
+    process.stdout.write(`workbench: web UI on ${webServer.url} (web.enabled in the config)\n`)
+  }
   const status = (): string =>
     JSON.stringify(
       {
@@ -260,6 +319,40 @@ async function serve(kernel: Kernel, port: number): Promise<void> {
   })
   clearInterval(heartbeat)
   await new Promise<void>((resolve) => server.close(() => resolve()))
+  if (webServer) await webServer.close()
+}
+
+/**
+ * Long-running Web UI entrypoint (`workbench web`): boots the kernel, starts the
+ * core web provider (the seam) and stays up until SIGINT/SIGTERM. The UI itself
+ * is built by the plugins the config loads - with none, the empty shell is
+ * served, which is what makes "UI is composed ONLY of plugins" checkable.
+ * The core adds NO product feature here: it serves bytes and routes them.
+ */
+async function web(kernel: Kernel, flags: Flags): Promise<void> {
+  const webConfig = kernel.config.web ?? {}
+  const server = await kernel.startWeb({
+    host: resolveWebHost(flags.host, webConfig.host),
+    port: resolveWebPort(flags.port ?? flags.webPort, webConfig.port),
+  })
+  process.stdout.write(`workbench: web UI on ${server.url} config=${kernel.configFile}\n`)
+  process.stdout.write(summaryLine(kernel) + '\n')
+  const pages = kernel.web.pages()
+  process.stdout.write(
+    pages.length
+      ? `pages: ${pages.map((page) => `${page.title} ${page.path} (${page.plugin})`).join(', ')}\n`
+      : 'pages: none - no UI plugin is configured, the empty shell is served\n',
+  )
+  process.stdout.write(`seam: ${pages.length} page(s), ${kernel.web.routes().length} route(s), ${kernel.web.assets().length} asset(s)\n`)
+  await new Promise<void>((resolve) => {
+    const stop = (signal: NodeJS.Signals): void => {
+      process.stdout.write(`workbench: ${signal} received, shutting down\n`)
+      resolve()
+    }
+    process.once('SIGINT', stop)
+    process.once('SIGTERM', stop)
+  })
+  await server.close()
 }
 
 async function main(): Promise<void> {
@@ -273,7 +366,17 @@ async function main(): Promise<void> {
   if (head === 'serve') {
     const kernel = await createKernel({ configFile: resolveConfigFile(flags), includeExternal: flags.includeExternal })
     try {
-      await serve(kernel, resolvePort(flags))
+      await serve(kernel, flags, resolvePort(flags))
+    } finally {
+      await kernel.dispose()
+    }
+    return
+  }
+
+  if (head === 'web') {
+    const kernel = await createKernel({ configFile: resolveConfigFile(flags), includeExternal: flags.includeExternal })
+    try {
+      await web(kernel, flags)
     } finally {
       await kernel.dispose()
     }

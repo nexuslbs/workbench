@@ -144,13 +144,178 @@ export interface CredentialsConfig {
   scope?: string
 }
 
+/** A plugin the loader could not load: reported, never fatal. */
+export interface LoadFailure {
+  plugin: string
+  source: string
+  error: string
+}
+
+/** A configured plugin source, as resolved and reported by the loader. */
+export interface SourceReport {
+  id: string
+  kind: string
+  dir: string | null
+  external: boolean
+  plugins: number
+  error?: string
+}
+
+/** Where a discovered plugin stands in the live host. */
+export type PluginState = 'loaded' | 'failed' | 'disabled' | 'discovered'
+
+/** One discovered plugin, with its manifest facts and its live state. */
+export interface PluginDiscoveryInfo {
+  name: string
+  version: string
+  description?: string
+  /** Absolute plugin directory. */
+  dir: string
+  /** Source id the plugin was discovered in. */
+  source: string
+  external: boolean
+  /** Rendered capabilities (display form). */
+  capabilities: string[]
+  state: PluginState
+  /** Load error, when `state` is `failed`. */
+  error?: string
+  /** Commands the plugin registered (only while loaded). */
+  commands: string[]
+}
+
+/** A command registration, as reported by the inventory. */
+export interface CommandInfo {
+  name: string
+  description?: string
+  plugin?: string
+}
+
+/**
+ * The loader inventory: the read path every consumer uses (`workbench plugins`,
+ * the Plugin Inventory UI). It is built from the loader registry only - no
+ * consumer scrapes files or config to rebuild it.
+ */
+export interface HostInventory {
+  /** Config file the host was booted from (or `(inline config)`). */
+  configFile: string
+  /** Plugins that are loaded right now. */
+  plugins: LoadedPlugin[]
+  sources: SourceReport[]
+  failures: LoadFailure[]
+  /** Names of discovered plugins that are disabled in the config. */
+  disabled: string[]
+  /** Every discovered plugin with its state (loaded, failed, disabled, discovered). */
+  discovered: PluginDiscoveryInfo[]
+  commands: CommandInfo[]
+}
+
+/** The actions the host (loader) API exposes. */
+export type HostAction =
+  | 'load'
+  | 'unload'
+  | 'reload'
+  | 'enable'
+  | 'disable'
+  | 'retry'
+  | 'install-source'
+  | 'remove-source'
+
+/** What a host action did, with the before/after inventory (the refresh). */
+export interface HostActionResult {
+  ok: boolean
+  action: HostAction
+  target: string
+  /** The raw request that produced the action (no secret ever appears here). */
+  request: Record<string, unknown>
+  /** True when the change was persisted to the config file. */
+  persisted: boolean
+  before: HostInventory
+  after: HostInventory
+  message: string
+}
+
+/**
+ * The host (loader) mutation API: install/enable/disable/retry/compose all go
+ * through here, never through direct filesystem writes from a plugin. Every
+ * action reports the loader state before and after, so a consumer can show the
+ * effect instead of claiming it.
+ */
+export interface HostApi {
+  inventory(): HostInventory
+  canPersist(): { ok: boolean; reason?: string }
+  load(name: string): Promise<HostActionResult>
+  unload(name: string): Promise<HostActionResult>
+  reload(name: string): Promise<HostActionResult>
+  retry(name: string): Promise<HostActionResult>
+  enable(name: string): Promise<HostActionResult>
+  disable(name: string): Promise<HostActionResult>
+  install(spec: SourceSpec): Promise<HostActionResult>
+  uninstall(id: string): Promise<HostActionResult>
+}
+
+/** One edit of a config file (see {@link ConfigPatch} and the config seam). */
+export type ConfigPatch =
+  | { op: 'set'; path: (string | number)[]; value: unknown }
+  | { op: 'delete'; path: (string | number)[] }
+  | { op: 'append'; path: (string | number)[]; value: unknown }
+
+/** What the config seam reports: the file as written, plus its parsed value. */
+export interface RawConfigView {
+  file: string
+  /** True when the file is a real file (an inline config cannot be edited). */
+  writable: boolean
+  /** File text as written; `${env:VAR}` and `${cred:NAME}` stay by NAME. */
+  text: string
+  /** Parsed value with NO expansion applied. */
+  value: unknown
+}
+
+/**
+ * The config seam (Settings / Plugin Settings consume it): view the active
+ * config file, edit a value and persist it, re-read it. Values are read
+ * UNEXPANDED, so a secret reference is visible by NAME only - the seam never
+ * resolves a credential and never returns a value.
+ */
+export interface ConfigApi {
+  file(): string
+  /** The active config file as written (references stay by name). */
+  view(): RawConfigView
+  /** Applies a patch to the config file, persists it and returns the new view. */
+  update(patch: ConfigPatch[]): RawConfigView
+  /** Per-plugin config as it was delivered to the plugin (credentials expanded). */
+  pluginConfig(name: string): Record<string, unknown>
+}
+
 /** The workbench config file (`workbench.config.json`). */
 export interface WorkbenchConfig {
   sources: SourceSpec[]
   /** Per plugin config, keyed by plugin name. */
-  plugins?: Record<string, Record<string, unknown>>
+  plugins?: Record<string, PluginConfig>
   /** Credentials provider selection/precedence (see {@link CredentialsConfig}). */
   credentials?: CredentialsConfig
+  /** Web UI section (see {@link WebConfig}); absent keeps the historical behaviour. */
+  web?: WebConfig
+}
+
+/**
+ * The `web` section: whether the long-running `serve` entrypoint also starts
+ * the web UI, and where it binds. Absent/empty keeps today's behaviour (no UI
+ * listener); `workbench web` starts one regardless.
+ */
+export interface WebConfig {
+  /** `serve`: also start the web UI listener (default false). */
+  enabled?: boolean
+  /** Bind host (default 127.0.0.1 - the UI has no auth in this round). */
+  host?: string
+  /** Bind port (default 12348; `0` picks a free port). */
+  port?: number
+}
+
+/** Per-plugin config, keyed by plugin name; `disabled` is the loader's own key. */
+export interface PluginConfig {
+  /** True when the loader must skip this plugin (enable/disable is configuration). */
+  disabled?: boolean
+  [key: string]: unknown
 }
 
 /** The service the core provides to every plugin (`ctx.workbench`). */
@@ -162,6 +327,12 @@ export interface Workbench {
   resolve(argv: string[]): { command: CommandDefinition; args: string[] } | undefined
   plugins(): LoadedPlugin[]
   log(message: string): void
+  /** The loader inventory (read path; what `workbench plugins` prints). */
+  inventory(): HostInventory
+  /** The host (loader) mutation API: install/enable/disable/retry/compose. */
+  host(): HostApi
+  /** The config seam: view/edit/persist the active config file. */
+  config(): ConfigApi
 }
 
 /** A cordis context with the workbench core service attached. */

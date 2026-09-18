@@ -157,6 +157,71 @@ the providers tried, never a value. The operator config references them
 (`${env:VAR}` and `${cred:NAME}` expansion are both available in config values)
 and the core decides how to hand them over.
 
+## 4c. Web capability (`ctx.web`)
+
+The Web UI is composed ONLY of plugins. The core knows how to SERVE bytes and
+how to route them - it ships no page, no router, no template engine and no UI
+framework. This is the same three-role seam as credentials
+(`Provider -> Definition <- Consumer`, `web@1`):
+
+- **Definition** (core, `src/web/definition.ts`, exported from `src/index.ts`):
+  the typed contract plus the `Web` service handle. It touches no socket and no
+  file.
+- **Provider**: the serving side. The core ships exactly one,
+  `src/web/providers/http.ts` (a `node:http` server wired by the composition
+  root `src/kernel.ts`); it is the only core module that touches a socket. It
+  serves, in order: the minimal core shell (`/`, any registered page path,
+  `/shell.css`, `/shell.js`), the static assets plugins registered (read from the
+  plugin directory on every request), the routes plugins registered, then a JSON
+  404. Everything it registers (`GET /api/web/pages`, the shell assets) is
+  disposed when the server is closed.
+- **Consumer**: a UI plugin. It registers routes/assets/pages through `ctx.web`
+  and never imports a provider.
+
+`inject: ['web']` is required to touch the seam. Every registration returns its
+disposer, so wrap it in `ctx.effect(...)` and unloading the plugin removes its
+routes, assets and pages cleanly (proved by `test/web.test.ts`).
+
+| Member | Meaning |
+| --- | --- |
+| `ctx.web.route({ method, path, handler, description? })` | Registers one route (one method + one exact path). `handler(request)` returns `{ status?, contentType?, headers?, body? }`, or nothing to fall through to the 404. Registers `GET /api/...` JSON endpoints and anything else the plugin needs. |
+| `ctx.web.asset({ path, file, contentType? })` | Serves one file verbatim at one URL path (`file` is absolute, typically inside the plugin directory: no build step, the browser gets the source). The MIME type defaults from the file extension. |
+| `ctx.web.page({ id, title, path, module, description? })` | Adds one nav entry + one page to the shell. `path` is the URL the shell answers with itself, `module` the browser module URL the shell imports to mount the page. Page ids and page paths are unique across the UI. |
+| `ctx.web.pages()` / `assets()` / `routes()` | The registrations so far, each with the plugin that made it. |
+| `ctx.web.info()` | The whole seam state (`contract`, `routes`, `assets`, `pages`) - what an inventory surface shows. |
+| `ctx.web.assetAt(path)` / `pageByPath(path)` | The asset/page registered for a URL path (provider lookups). |
+| `ctx.web.dispatch(request)` | The route dispatch a provider calls; `undefined` when no route matched. |
+
+A route handler is I/O free: it receives a `WebRequest` (method, path, query,
+headers, `readText()`, `readJson()`) and returns a `WebResponse`. The provider
+enforces the body cap and the socket, so a handler can be unit tested without a
+server.
+
+### Entrypoints and configuration
+
+| Command | Behaviour |
+| --- | --- |
+| `workbench web` (or `npm run web`) | Boots the kernel and starts the Web UI listener (the serve/loader seam only). Prints the URL. |
+| `workbench serve` | The long-running service mode (status endpoint on `--port`/`$WORKBENCH_PORT`, default 12347). When the config sets `web.enabled: true` the SAME process also starts the Web UI listener - one long-running process, not a second mode. |
+
+```yaml
+web:
+  enabled: true      # serve also starts the Web UI (absent/false keeps today's behaviour)
+  host: 127.0.0.1    # loopback by default: the UI has no auth in this round
+  port: 12348
+```
+
+Resolution order: flag (`--host`, `--port`), then environment
+(`$WORKBENCH_WEB_HOST`, `$WORKBENCH_WEB_PORT`), then the config, then the
+documented defaults `127.0.0.1:12348`. With no UI plugin configured the server
+still boots and serves the empty shell ("no pages registered"); the CLI surfaces
+(`hello`, `plugins`, `commands`, `credentials`) are unchanged.
+
+A UI plugin is an ordinary plugin: a directory in any configured source with a
+manifest (`entry`, `capabilities` - e.g. `web:page:plugin-inventory`) and an
+entry module that registers its routes, assets and page. Removing it from the
+config leaves the server (and every other surface) working.
+
 ## 5. How an external source is added
 
 The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /

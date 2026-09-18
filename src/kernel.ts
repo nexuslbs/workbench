@@ -1,11 +1,15 @@
 import path from 'node:path'
 import { Context } from 'cordis'
 import { expandCredentialRefsDeep, findDefaultConfigFile, readConfig } from './config.ts'
+import { readRawConfig, updateConfigFile } from './configfile.ts'
 import { Credentials, CREDENTIALS, CREDENTIALS_VERSION, type CredentialRef, type CredentialsService } from './credentials/definition.ts'
 import { CORE_PROVIDERS, registerCoreProviders } from './credentials/providers/index.ts'
+import { Host } from './host.ts'
 import { loadPlugins, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { CommandRegistry } from './registry.ts'
-import type { LoadedPlugin, WorkbenchConfig } from './types.ts'
+import { WEB, DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, Web } from './web/definition.ts'
+import { createWebServer, type WebServer } from './web/providers/http.ts'
+import type { ConfigApi, LoadedPlugin, Workbench, WorkbenchConfig } from './types.ts'
 
 export interface KernelOptions {
   /** Config file to load (default: the first default config file in the working directory). */
@@ -22,6 +26,14 @@ export interface KernelOptions {
   log?: (message: string) => void
 }
 
+/** Options of {@link Kernel.startWeb}: the serve/loader seam, no product feature. */
+export interface StartWebOptions {
+  /** Bind host (default 127.0.0.1 - the UI has no auth in this round). */
+  host?: string
+  /** Bind port (default 12348; `0` picks a free port). */
+  port?: number
+}
+
 export interface Kernel {
   ctx: Context
   registry: CommandRegistry
@@ -31,11 +43,32 @@ export interface Kernel {
    * `ctx.credentials` from any plugin (inject: ['credentials']).
    */
   credentials: CredentialsService
+  /**
+   * The WEB capability (`ctx.web`): the seam UI plugins register routes, assets
+   * and pages with. The kernel provides the service; {@link Kernel.startWeb}
+   * starts the core `node:http` provider for it.
+   */
+  web: Web
+  /**
+   * The host (loader) API: the live plugin set and every mutation of it
+   * (load/unload/reload/retry/enable/disable/install/uninstall). Also reachable
+   * as `ctx.workbench.host()` from any plugin.
+   */
+  host: Host
   /** Config file the kernel was booted from (the resolved path, or a marker for an inline config). */
   configFile: string
-  plugins: LoadedPlugin[]
-  failures: LoadFailure[]
-  sources: SourceReport[]
+  /** The config as written (re-read from the file when the host has one). */
+  readonly config: WorkbenchConfig
+  /** Loaded plugins, live from the host (a getter: it follows host actions). */
+  readonly plugins: LoadedPlugin[]
+  /** Load failures, live from the host. */
+  readonly failures: LoadFailure[]
+  /** Configured sources, live from the host. */
+  readonly sources: SourceReport[]
+  /** Starts the core web provider for {@link Kernel.web}; close it with {@link Kernel.dispose}. */
+  startWeb(options?: StartWebOptions): Promise<WebServer>
+  /** The web server started by {@link Kernel.startWeb}, when one is running. */
+  readonly webServer: WebServer | undefined
   dispose(): Promise<void>
 }
 
@@ -46,11 +79,11 @@ function declaresCredentialProvider(discovery: PluginDiscovery): boolean {
 
 /**
  * Boots the workbench kernel: create the cordis root context, provide the
- * workbench service and the credentials SERVICE, declare every provider (the
- * four core ones plus whatever plugin manifests claim), fix the enabled
- * providers from configuration, load the plugins, then resolve the credential
- * references of the config through the service (a CONSUMER: it never touches a
- * provider).
+ * workbench service, the WEB seam and the credentials SERVICE, declare every
+ * provider (the four core ones plus whatever plugin manifests claim), fix the
+ * enabled providers from configuration, load the plugins, then resolve the
+ * credential references of the config through the service (a CONSUMER: it never
+ * touches a provider).
  *
  * The load happens in two phases so that provider plugins are up BEFORE the
  * config's `${cred:NAME}` references are resolved, while the rest of the plugins
@@ -79,6 +112,12 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const ctx = new Context()
   await ctx.plugin({ name: 'workbench', apply: (c) => { c.provide('workbench', registry) } })
 
+  // The WEB seam (the definition): the kernel provides the service, so a UI
+  // plugin can register routes/assets/pages from any source. No socket here -
+  // that is the provider's job, started by `startWeb`.
+  let web!: Web
+  await ctx.plugin({ name: WEB, apply: (c) => { web = new Web(c) } })
+
   // The credentials service: the definition's default implementation plus the
   // DECLARATIONS of the core providers (they are core modules, not plugins of a
   // source, so the kernel declares them; their registrations follow).
@@ -101,12 +140,20 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   })
 
   const cacheDir = options.cacheDir ?? process.env.WORKBENCH_CACHE_DIR?.trim() ?? ''
-  const loadOptions = {
-    config,
+  const expansionOptions = config.credentials?.scope === undefined ? {} : { scope: config.credentials.scope }
+  const resolver = { resolve: (ref: CredentialRef) => credentials.resolve(ref), enabled: () => credentials.enabled() }
+
+  // The HOST: the live plugin set and the single mutation path. It exists before
+  // the plugins load so `ctx.workbench.host()` / `.inventory()` already work
+  // while a plugin is being applied.
+  const host = new Host({
+    ctx,
+    log,
+    configFile,
     configDir,
     cacheDir: cacheDir.length > 0 ? cacheDir : path.join(configDir, '.workbench', 'sources'),
     includeExternal: options.includeExternal !== false,
-    log,
+    config,
     declare: (discovery: PluginDiscovery): void => {
       for (const capability of discovery.capabilities) {
         if (capability.id !== CREDENTIALS || capability.provider === undefined) continue
@@ -119,6 +166,50 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
         })
       }
     },
+    pluginConfig: async (name, raw) => {
+      const expanded = (await expandCredentialRefsDeep(raw, resolver, expansionOptions)) as Record<string, unknown>
+      void name
+      return expanded ?? {}
+    },
+  })
+
+  // The config seam (Settings / Plugin Settings): view / edit / persist the
+  // active config file plus the per-plugin config as written (references BY
+  // NAME - this never resolves a credential).
+  const configApi: ConfigApi = {
+    file: () => host.configFilePath() ?? configFile,
+    view: () => {
+      const file = host.configFilePath()
+      if (file === undefined) throw new Error('the kernel runs on an inline config: there is no config file to view')
+      return readRawConfig(file)
+    },
+    update: (patch) => {
+      const file = host.configFilePath()
+      if (file === undefined) throw new Error('the kernel runs on an inline config: there is no config file to update')
+      const view = updateConfigFile(file, patch)
+      host.reloadConfig()
+      return view
+    },
+    pluginConfig: (name) => host.pluginConfigView(name),
+  }
+
+  // The core service object: the command registry (what plugins register with)
+  // plus the read/mutate surfaces the UI consumes. It is one object because a
+  // plugin reaches the core through `ctx.workbench` alone.
+  Object.assign(registry, {
+    inventory: () => host.inventory(),
+    host: () => host,
+    config: () => configApi,
+  })
+  const workbench = registry as unknown as CommandRegistry & Workbench
+  void workbench
+
+  const loadOptions = {
+    config,
+    configDir,
+    cacheDir: host.options.cacheDir,
+    includeExternal: options.includeExternal !== false,
+    log,
   }
 
   // Phase 1: the plugins that PROVIDE the capability (core modules are already
@@ -128,10 +219,9 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   credentials.setEnabled(config.credentials?.providers)
 
   // The config loader consumes the capability: `${cred:NAME}` / `${secret:NAME}`.
-  const expansionOptions = config.credentials?.scope === undefined ? {} : { scope: config.credentials.scope }
   const expanded = (await expandCredentialRefsDeep(
     { sources: config.sources, plugins: config.plugins ?? {} },
-    { resolve: (ref: CredentialRef) => credentials.resolve(ref), enabled: () => credentials.enabled() },
+    resolver,
     expansionOptions,
   )) as { sources: WorkbenchConfig['sources']; plugins: Record<string, Record<string, unknown>> }
   const effective: WorkbenchConfig = { ...config, sources: expanded.sources, plugins: expanded.plugins }
@@ -145,14 +235,59 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const sources: SourceReport[] = rest.sources.map((source) => ({ ...source, plugins: counts.get(source.id) ?? 0 }))
   registry.setPlugins(plugins)
 
+  const fibers = new Map(providers.fibers)
+  for (const [name, fiber] of rest.fibers) fibers.set(name, fiber)
+  const discoveries = new Map<string, PluginDiscovery>()
+  for (const discovery of [...providers.discoveries, ...rest.discoveries]) discoveries.set(discovery.name, discovery)
+  host.adopt({
+    config: effective,
+    sources,
+    discoveries: [...discoveries.values()],
+    plugins,
+    failures: [...providers.failures, ...rest.failures],
+    fibers,
+    disabled: [...new Set([...providers.disabled, ...rest.disabled])],
+  })
+
+  let webServer: WebServer | undefined
+
   return {
     ctx,
     registry,
     credentials,
+    web,
+    host,
     configFile,
-    plugins,
-    failures: [...providers.failures, ...rest.failures],
-    sources,
-    dispose: async () => { await ctx.fiber.dispose() },
+    get config(): WorkbenchConfig {
+      return host.rawConfig()
+    },
+    get plugins(): LoadedPlugin[] {
+      return host.inventory().plugins
+    },
+    get failures(): LoadFailure[] {
+      return host.inventory().failures
+    },
+    get sources(): SourceReport[] {
+      return host.inventory().sources
+    },
+    async startWeb(start: StartWebOptions = {}): Promise<WebServer> {
+      if (webServer) return webServer
+      webServer = await createWebServer(web, {
+        host: start.host ?? DEFAULT_WEB_HOST,
+        port: start.port ?? DEFAULT_WEB_PORT,
+        log,
+      })
+      return webServer
+    },
+    get webServer(): WebServer | undefined {
+      return webServer
+    },
+    dispose: async () => {
+      if (webServer) {
+        await webServer.close()
+        webServer = undefined
+      }
+      await ctx.fiber.dispose()
+    },
   }
 }

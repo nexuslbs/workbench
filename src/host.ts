@@ -1,0 +1,493 @@
+/**
+ * The HOST (loader) API: the single write path to the live plugin set.
+ *
+ * Every mutation a UI (or any other consumer) performs goes through this class:
+ * load, unload, reload, retry, enable, disable, install a source, uninstall a
+ * source. It is deliberately NOT a second loader: discovering uses
+ * {@link discoverPlugins} and instantiating uses {@link loadDiscovered}, the
+ * very functions the boot uses, so a UI-driven load is the same operation as a
+ * boot-time load (same import, same `ctx.plugin`, same command attribution and
+ * the same clean disposal on unload).
+ *
+ * Persistence goes through the config seam ({@link updateConfigFile}): enable /
+ * disable / install / uninstall are CONFIG edits (`plugins.<name>.disabled`,
+ * `sources[]`), never hidden state. When the host runs on an inline config the
+ * action still takes effect in the running process and reports
+ * `persisted: false` with the reason from {@link Host.canPersist}.
+ *
+ * Every action returns the inventory BEFORE and AFTER, so a consumer can show
+ * the real loader state change instead of claiming one.
+ */
+import path from 'node:path'
+import type { Context, Fiber } from 'cordis'
+import { readConfig } from './config.ts'
+import { updateConfigFile } from './configfile.ts'
+import { discoverPlugins, loadDiscovered, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
+import { resolveSource } from './sources.ts'
+import {
+  renderCapability,
+  type CommandInfo,
+  type ConfigPatch,
+  type HostAction,
+  type HostActionResult,
+  type HostApi,
+  type HostInventory,
+  type LoadedPlugin,
+  type PluginDiscoveryInfo,
+  type PluginState,
+  type SourceSpec,
+  type WorkbenchConfig,
+} from './types.ts'
+
+/** One plugin the host knows about, with its live state. */
+export interface HostEntry {
+  discovery: PluginDiscovery
+  state: PluginState
+  fiber?: Fiber
+  error?: string
+  /** The config the plugin was instantiated with (references already expanded). */
+  config?: Record<string, unknown>
+}
+
+export interface HostOptions {
+  ctx: Context
+  log: (message: string) => void
+  /** Config file the host was booted from, or `(inline config)`. */
+  configFile: string
+  configDir: string
+  cacheDir: string
+  includeExternal: boolean
+  /** Raw config as booted; re-read from {@link HostOptions.configFile} when it is a real file. */
+  config: WorkbenchConfig
+  /** Called for every discovery BEFORE import (credential provider declarations). */
+  declare?: (discovery: PluginDiscovery) => void
+  /**
+   * The config a plugin is instantiated with: the raw `plugins.<name>` value
+   * with credential references expanded by the kernel (credential VALUES never
+   * pass through the host).
+   */
+  pluginConfig?: (name: string, raw: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>
+}
+
+/** The slice of the core service the host needs (avoids an import cycle). */
+interface RegistryLike {
+  commands(): CommandInfo[] | { name: string; description?: string; plugin?: string }[]
+  setPlugins(plugins: LoadedPlugin[]): void
+}
+
+/** Adopted boot state: what the kernel loaded before the host took over. */
+export interface AdoptedState {
+  config: WorkbenchConfig
+  sources: SourceReport[]
+  discoveries: PluginDiscovery[]
+  plugins: LoadedPlugin[]
+  failures: LoadFailure[]
+  fibers: Map<string, Fiber>
+  disabled: string[]
+}
+
+export class Host implements HostApi {
+  readonly ctx: Context
+  readonly options: HostOptions
+  private entries = new Map<string, HostEntry>()
+  private sourceReports: SourceReport[] = []
+  private current: WorkbenchConfig
+
+  constructor(options: HostOptions) {
+    this.options = options
+    this.ctx = options.ctx
+    this.current = options.config
+  }
+
+  private registry(): RegistryLike {
+    return (this.ctx as unknown as { workbench: RegistryLike }).workbench
+  }
+
+  /** Takes over the state of a boot performed by the kernel. */
+  adopt(state: AdoptedState): void {
+    this.current = state.config
+    this.sourceReports = state.sources
+    for (const discovery of state.discoveries) {
+      this.entries.set(discovery.name, { discovery, state: 'discovered' })
+    }
+    for (const plugin of state.plugins) {
+      const entry = this.entries.get(plugin.name)
+      const fiber = state.fibers.get(plugin.name)
+      this.entries.set(plugin.name, {
+        discovery: entry?.discovery ?? discoveryOf(plugin),
+        state: 'loaded',
+        ...(fiber === undefined ? {} : { fiber }),
+      })
+    }
+    for (const failure of state.failures) {
+      const entry = this.entries.get(failure.plugin)
+      if (entry === undefined) continue
+      entry.state = 'failed'
+      entry.error = failure.error
+    }
+    for (const name of state.disabled) {
+      const entry = this.entries.get(name)
+      if (entry !== undefined) entry.state = 'disabled'
+    }
+    this.syncRegistry()
+  }
+
+  // ---------------------------------------------------------------- read path
+
+  /** The loader inventory: the data every read surface shows. */
+  inventory(): HostInventory {
+    const commands = this.registry().commands() as CommandInfo[]
+    const entries = [...this.entries.values()].sort((a, b) => a.discovery.name.localeCompare(b.discovery.name))
+    const plugins: LoadedPlugin[] = []
+    const failures: LoadFailure[] = []
+    const disabled: string[] = []
+    const discovered: PluginDiscoveryInfo[] = []
+    const loadedPerSource = new Map<string, number>()
+    for (const entry of entries) {
+      const { discovery } = entry
+      if (entry.state === 'loaded') {
+        plugins.push(loadedOf(discovery))
+        loadedPerSource.set(discovery.source, (loadedPerSource.get(discovery.source) ?? 0) + 1)
+      }
+      if (entry.state === 'failed') {
+        failures.push({ plugin: discovery.name, source: discovery.source, error: entry.error ?? 'unknown error' })
+      }
+      if (entry.state === 'disabled') disabled.push(discovery.name)
+      discovered.push({
+        name: discovery.name,
+        version: discovery.version,
+        description: discovery.description,
+        dir: discovery.dir,
+        source: discovery.source,
+        external: discovery.external,
+        capabilities: discovery.capabilities.map(renderCapability),
+        state: entry.state,
+        ...(entry.error === undefined ? {} : { error: entry.error }),
+        commands: commands.filter((command) => command.plugin === discovery.name).map((command) => command.name),
+      })
+    }
+    const sources = this.sourceReports.map((source) => ({ ...source, plugins: loadedPerSource.get(source.id) ?? 0 }))
+    return {
+      configFile: this.options.configFile,
+      plugins,
+      sources,
+      failures,
+      disabled,
+      discovered,
+      commands: commands.map(({ name, description, plugin }) => ({ name, description, plugin })),
+    }
+  }
+
+  /** The config file the host edits, or undefined for an inline config. */
+  configFilePath(): string | undefined {
+    return this.options.configFile.startsWith('(') ? undefined : path.resolve(this.options.configFile)
+  }
+
+  canPersist(): { ok: boolean; reason?: string } {
+    const file = this.configFilePath()
+    if (file === undefined) return { ok: false, reason: 'the host was booted from an inline config (no file to persist to)' }
+    return { ok: true }
+  }
+
+  /** The config as written (unexpanded); re-read from the file when possible. */
+  rawConfig(): WorkbenchConfig {
+    const file = this.configFilePath()
+    if (file === undefined) return this.current
+    return readConfig(file).config
+  }
+
+  /**
+   * Per-plugin config AS WRITTEN (credential references stay BY NAME): the
+   * Settings surface must never receive a resolved value, so this reads the raw
+   * config, not the config a plugin was instantiated with.
+   */
+  pluginConfigView(name: string): Record<string, unknown> {
+    return { ...(this.rawConfig().plugins?.[name] ?? {}) }
+  }
+
+  /** Re-reads the config file after an external write (the config seam). */
+  reloadConfig(): WorkbenchConfig {
+    this.current = this.rawConfig()
+    return this.current
+  }
+
+  // ------------------------------------------------------------ action driver
+
+  private async perform(
+    action: HostAction,
+    target: string,
+    request: Record<string, unknown>,
+    mutate: (state: { persisted: boolean }) => Promise<string> | string,
+  ): Promise<HostActionResult> {
+    const before = this.inventory()
+    const state = { persisted: false }
+    let message: string
+    let ok = true
+    try {
+      message = await mutate(state)
+    } catch (error) {
+      ok = false
+      message = `${action} '${target}' failed: ${error instanceof Error ? error.message : String(error)}`
+      this.options.log(`host: ${message}`)
+    }
+    this.refresh()
+    return { ok, action, target, request, persisted: state.persisted, before, after: this.inventory(), message }
+  }
+
+  /** Re-scans the configured sources so new/removed plugins become visible. */
+  private refresh(): void {
+    const found = discoverPlugins({
+      config: this.rawConfig(),
+      configDir: this.options.configDir,
+      cacheDir: this.options.cacheDir,
+      includeExternal: this.options.includeExternal,
+      log: this.options.log,
+    })
+    this.sourceReports = found.sources
+    const seen = new Set<string>()
+    for (const discovery of found.discoveries) {
+      seen.add(discovery.name)
+      const entry = this.entries.get(discovery.name)
+      if (entry === undefined) this.entries.set(discovery.name, { discovery, state: 'discovered' })
+      else entry.discovery = discovery
+    }
+    for (const [name, entry] of [...this.entries]) {
+      if (seen.has(name)) continue
+      if (entry.state === 'loaded') continue
+      this.entries.delete(name)
+    }
+    this.syncRegistry()
+  }
+
+  /** Keeps `ctx.workbench.plugins()` in step with the loaded set. */
+  private syncRegistry(): void {
+    const loaded = [...this.entries.values()].filter((entry) => entry.state === 'loaded').map((entry) => loadedOf(entry.discovery))
+    this.registry().setPlugins(loaded)
+  }
+
+  /** Finds the discovery of a plugin, refreshing once when the host does not know it. */
+  private discoveryOf(name: string): PluginDiscovery {
+    const known = this.entries.get(name)?.discovery
+    if (known !== undefined) return known
+    this.refresh()
+    const found = this.entries.get(name)?.discovery
+    if (found === undefined) {
+      throw new Error(`plugin '${name}' is not discovered in any configured source (check the source list and the config file)`)
+    }
+    return found
+  }
+
+  private async pluginConfigFor(name: string, raw: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const withoutFlag = { ...raw }
+    delete withoutFlag.disabled
+    return (await this.options.pluginConfig?.(name, withoutFlag)) ?? withoutFlag
+  }
+
+  // -------------------------------------------------------------- action impl
+
+  async load(name: string): Promise<HostActionResult> {
+    return this.perform('load', name, { name }, async () => {
+      const entry = this.entries.get(name)
+      if (entry?.state === 'loaded') return `plugin '${name}' is already loaded`
+      const discovery = this.discoveryOf(name)
+      const raw = this.rawConfig().plugins?.[name] ?? {}
+      if (raw.disabled === true) {
+        this.options.log(`host: plugin '${name}' is disabled in the config, loading it anyway (explicit request)`)
+      }
+      const config = await this.pluginConfigFor(name, raw)
+      const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
+      this.entries.set(name, { discovery, state: 'loaded', fiber })
+      this.syncRegistry()
+      return `loaded plugin '${name}' from ${discovery.source}`
+    })
+  }
+
+  async unload(name: string): Promise<HostActionResult> {
+    return this.perform('unload', name, { name }, async () => {
+      const entry = this.entries.get(name)
+      if (entry === undefined || entry.state !== 'loaded') {
+        throw new Error(`plugin '${name}' is not loaded (state: ${entry?.state ?? 'unknown'})`)
+      }
+      await entry.fiber?.dispose()
+      entry.state = 'discovered'
+      delete entry.fiber
+      delete entry.config
+      this.syncRegistry()
+      return `unloaded plugin '${name}' (its commands, routes, assets and pages are disposed)`
+    })
+  }
+
+  async reload(name: string): Promise<HostActionResult> {
+    return this.perform('reload', name, { name }, async () => {
+      const entry = this.entries.get(name)
+      if (entry?.state === 'loaded') {
+        await entry.fiber?.dispose()
+        entry.state = 'discovered'
+        delete entry.fiber
+        delete entry.config
+        this.syncRegistry()
+      }
+      const discovery = this.discoveryOf(name)
+      const raw = this.rawConfig().plugins?.[name] ?? {}
+      const config = await this.pluginConfigFor(name, raw)
+      const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
+      this.entries.set(name, { discovery, state: 'loaded', fiber })
+      this.syncRegistry()
+      return `reloaded plugin '${name}' from ${discovery.source}`
+    })
+  }
+
+  async retry(name: string): Promise<HostActionResult> {
+    return this.perform('retry', name, { name }, async () => {
+      const entry = this.entries.get(name)
+      if (entry !== undefined && entry.state === 'loaded') {
+        await entry.fiber?.dispose()
+        this.syncRegistry()
+      }
+      const discovery = this.discoveryOf(name)
+      const raw = this.rawConfig().plugins?.[name] ?? {}
+      const config = await this.pluginConfigFor(name, raw)
+      const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
+      this.entries.set(name, { discovery, state: 'loaded', fiber })
+      this.syncRegistry()
+      return `retried plugin '${name}' - it loaded from ${discovery.source}`
+    })
+  }
+
+  async enable(name: string): Promise<HostActionResult> {
+    return this.perform('enable', name, { name }, async (state) => {
+      const discovery = this.discoveryOf(name)
+      const file = this.configFilePath()
+      const disabled = this.rawConfig().plugins?.[name]?.disabled === true
+      if (disabled) {
+        if (file === undefined) {
+          throw new Error("plugin is disabled in the config but the host has no config file to persist the change to")
+        }
+        const patch: ConfigPatch[] = [{ op: 'delete', path: ['plugins', name, 'disabled'] }]
+        updateConfigFile(file, patch)
+        state.persisted = true
+        this.reloadConfig()
+      }
+      const entry = this.entries.get(name)
+      if (entry?.state === 'loaded') return `plugin '${name}' is already loaded (its 'disabled' flag is cleared)`
+      if (entry !== undefined && entry.state === 'disabled') entry.state = 'discovered'
+      const raw = this.rawConfig().plugins?.[name] ?? {}
+      const config = await this.pluginConfigFor(name, raw)
+      const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
+      this.entries.set(name, { discovery, state: 'loaded', fiber })
+      this.syncRegistry()
+      return `enabled plugin '${name}' (config${state.persisted ? ' updated' : ' unchanged'}, plugin loaded)`
+    })
+  }
+
+  async disable(name: string): Promise<HostActionResult> {
+    return this.perform('disable', name, { name }, async (state) => {
+      const entry = this.entries.get(name)
+      if (entry === undefined) throw new Error(`plugin '${name}' is not discovered in any configured source`)
+      if (entry.state === 'loaded') {
+        await entry.fiber?.dispose()
+        delete entry.fiber
+        delete entry.config
+        this.syncRegistry()
+      }
+      const file = this.configFilePath()
+      if (file === undefined) {
+        entry.state = 'disabled'
+        throw new Error('plugin unloaded, but the host has no config file to persist the disable to')
+      }
+      const patch: ConfigPatch[] = [{ op: 'set', path: ['plugins', name, 'disabled'], value: true }]
+      updateConfigFile(file, patch)
+      state.persisted = true
+      this.reloadConfig()
+      entry.state = 'disabled'
+      return `disabled plugin '${name}' (unloaded and 'plugins.${name}.disabled: true' persisted)`
+    })
+  }
+
+  async install(spec: SourceSpec): Promise<HostActionResult> {
+    const target = spec.id ?? spec.path ?? spec.url ?? '(source)'
+    return this.perform('install-source', target, { source: spec }, async (state) => {
+      const raw = this.rawConfig()
+      if (raw.sources.some((source) => (spec.id !== undefined && source.id === spec.id) || (source.kind === spec.kind && source.path !== undefined && source.path === spec.path) || (source.kind === 'git' && spec.url !== undefined && source.url === spec.url))) {
+        throw new Error(`a source with id '${target}' is already configured`)
+      }
+      // Resolving the source before persisting it validates the coordinate (a
+      // git source is checked out into the cache here, by the loader, not by us).
+      const resolved = resolveSource(spec, this.options.configDir, this.options.cacheDir)
+      if (resolved.error || !resolved.dir) throw new Error(`source '${target}' did not resolve: ${resolved.error ?? 'no directory'}`)
+      const file = this.configFilePath()
+      if (file === undefined) throw new Error('the host has no config file to persist the new source to')
+      updateConfigFile(file, [{ op: 'append', path: ['sources'], value: spec as unknown as Record<string, unknown> }])
+      state.persisted = true
+      this.reloadConfig()
+      this.refresh()
+      const added = [...this.entries.values()].filter((entry) => entry.discovery.source === resolved.id)
+      let loaded = 0
+      for (const entry of added) {
+        if (entry.state === 'loaded') continue
+        try {
+          const config = await this.pluginConfigFor(entry.discovery.name, this.rawConfig().plugins?.[entry.discovery.name] ?? {})
+          const { fiber } = await loadDiscovered(this.ctx, entry.discovery, config, this.options.log)
+          entry.state = 'loaded'
+          entry.fiber = fiber
+          loaded += 1
+        } catch (error) {
+          entry.state = 'failed'
+          entry.error = error instanceof Error ? error.message : String(error)
+          this.options.log(`host: plugin ${entry.discovery.name} from the new source failed: ${entry.error}`)
+        }
+      }
+      this.syncRegistry()
+      return `installed source '${resolved.id}' (${resolved.kind}${resolved.dir ? ` ${resolved.dir}` : ''}), ${loaded} of ${added.length} plugin(s) loaded`
+    })
+  }
+
+  async uninstall(id: string): Promise<HostActionResult> {
+    return this.perform('remove-source', id, { id }, async (state) => {
+      const raw = this.rawConfig()
+      const index = raw.sources.findIndex((source) => source.id === id)
+      if (index < 0) throw new Error(`no configured source with id '${id}'`)
+      const unloaded: string[] = []
+      for (const entry of this.entries.values()) {
+        if (entry.discovery.source !== id || entry.state !== 'loaded') continue
+        await entry.fiber?.dispose()
+        unloaded.push(entry.discovery.name)
+      }
+      const file = this.configFilePath()
+      if (file === undefined) throw new Error('the host has no config file to persist the source removal to')
+      updateConfigFile(file, [{ op: 'delete', path: ['sources', index] }])
+      state.persisted = true
+      this.reloadConfig()
+      this.refresh()
+      this.syncRegistry()
+      return `removed source '${id}' (unloaded ${unloaded.length} plugin(s): ${unloaded.join(', ') || 'none'})`
+    })
+  }
+}
+
+/** The {@link LoadedPlugin} shape of a discovery. */
+function loadedOf(discovery: PluginDiscovery): LoadedPlugin {
+  return {
+    name: discovery.name,
+    version: discovery.version,
+    description: discovery.description,
+    capabilities: discovery.capabilities.map(renderCapability),
+    capabilityList: discovery.capabilities,
+    source: discovery.source,
+    dir: discovery.dir,
+    external: discovery.external,
+  }
+}
+
+/** The (partial) discovery a plugin record can rebuild when the scan did not see it. */
+function discoveryOf(plugin: LoadedPlugin): PluginDiscovery {
+  return {
+    name: plugin.name,
+    version: plugin.version,
+    description: plugin.description,
+    dir: plugin.dir,
+    source: plugin.source,
+    external: plugin.external,
+    capabilities: plugin.capabilityList ?? [],
+  }
+}

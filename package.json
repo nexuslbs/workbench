@@ -14,6 +14,7 @@
   "scripts": {
     "dev": "node src/cli.ts",
     "serve": "node src/cli.ts serve",
+    "web": "node src/cli.ts web",
     "typecheck": "tsc -p tsconfig.json",
     "check:seam": "node scripts/check-seam.ts",
     "test": "node --test test/*.test.ts"

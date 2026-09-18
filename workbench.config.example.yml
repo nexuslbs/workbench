@@ -28,3 +28,14 @@ plugins:
   # "1.0" and anything starting with a YAML indicator character (* & ! % @ ` etc).
   hello-world:
     message: Hello World
+
+# Web UI (composed by UI plugins through the ctx.web seam; the core only serves
+# bytes and routes). `workbench web` starts the listener; `workbench serve`
+# starts the same listener in the service process when `enabled` is true.
+# Absent or `enabled: false` keeps the historical behaviour exactly.
+web:
+  enabled: true
+  # loopback by default: the UI has no auth this round. Binding 0.0.0.0 exposes
+  # it to every machine that can reach this port.
+  host: 127.0.0.1
+  port: 12348
