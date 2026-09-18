@@ -21,7 +21,7 @@
 import path from 'node:path'
 import type { Context, Fiber } from 'cordis'
 import { readConfig } from './config.ts'
-import { updateConfigFile } from './configfile.ts'
+import { readRawConfig, updateConfigFile } from './configfile.ts'
 import { discoverPlugins, loadDiscovered, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { resolveSource } from './sources.ts'
 import {
@@ -189,7 +189,11 @@ export class Host implements HostApi {
     return { ok: true }
   }
 
-  /** The config as written (unexpanded); re-read from the file when possible. */
+  /**
+   * The config as a plugin is instantiated with it: `${env:VAR}` references are
+   * expanded here. This is NOT the config as written - a read surface must use
+   * {@link writtenConfig} instead.
+   */
   rawConfig(): WorkbenchConfig {
     const file = this.configFilePath()
     if (file === undefined) return this.current
@@ -197,12 +201,26 @@ export class Host implements HostApi {
   }
 
   /**
-   * Per-plugin config AS WRITTEN (credential references stay BY NAME): the
-   * Settings surface must never receive a resolved value, so this reads the raw
-   * config, not the config a plugin was instantiated with.
+   * The config EXACTLY AS WRITTEN: the file parsed again, with no `${env:VAR}`
+   * expansion, so every reference (`${env:VAR}` and `${cred:NAME}`) stays
+   * visible BY NAME. Falls back to the booted config when the host runs on an
+   * inline config (there is no file to read).
+   */
+  writtenConfig(): WorkbenchConfig {
+    const file = this.configFilePath()
+    if (file === undefined) return this.current
+    const value = readRawConfig(file).value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return this.current
+    return value as WorkbenchConfig
+  }
+
+  /**
+   * Per-plugin config AS WRITTEN (every reference, `${env:VAR}` included, stays
+   * BY NAME): the Settings surface must never receive a resolved value, so this
+   * reads the file as written, not the config a plugin was instantiated with.
    */
   pluginConfigView(name: string): Record<string, unknown> {
-    return { ...(this.rawConfig().plugins?.[name] ?? {}) }
+    return { ...(this.writtenConfig().plugins?.[name] ?? {}) }
   }
 
   /** Re-reads the config file after an external write (the config seam). */

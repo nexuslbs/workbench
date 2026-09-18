@@ -282,7 +282,7 @@ export interface ConfigApi {
   view(): RawConfigView
   /** Applies a patch to the config file, persists it and returns the new view. */
   update(patch: ConfigPatch[]): RawConfigView
-  /** Per-plugin config as it was delivered to the plugin (credentials expanded). */
+  /** Per-plugin config as written: `${env:VAR}` and `${cred:NAME}` stay BY NAME. */
   pluginConfig(name: string): Record<string, unknown>
 }
 
