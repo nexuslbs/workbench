@@ -1,7 +1,7 @@
 // Shared test fixtures.
 //
 // The external plugin used by the tests is created in a TEMP directory instead
-// of pointing at the sibling `workbench-plugins` checkout: the core repo has no
+// of pointing at a sibling plugins checkout: the core repo has no
 // dependency on any plugin repository, so `npm test` must pass without one.
 import fs from 'node:fs'
 import os from 'node:os'
@@ -57,7 +57,7 @@ function configValue(): { sources: unknown[]; plugins: Record<string, { message:
   return {
     sources: [
       { kind: 'path', id: 'core', path: CORE_PLUGINS, external: false },
-      { kind: 'path', id: 'workbench-plugins', path: '.' },
+      { kind: 'path', id: 'external-plugins', path: '.' },
     ],
     plugins: Object.fromEntries(pluginEntries().map(({ name, message }) => [name, { message }])),
   }
@@ -79,7 +79,7 @@ export function externalFixture(): Fixture {
     `    path: ${JSON.stringify(CORE_PLUGINS)}`,
     '    external: false',
     '  - kind: path',
-    '    id: workbench-plugins',
+    '    id: external-plugins',
     '    path: .',
     '',
     'plugins:',

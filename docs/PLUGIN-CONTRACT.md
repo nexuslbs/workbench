@@ -115,8 +115,8 @@ The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /
 {
   "sources": [
     { "kind": "path", "id": "core", "path": "./plugins", "external": false },
-    { "kind": "path", "id": "workbench-plugins", "path": "../workbench-plugins/plugins" },
-    { "kind": "git", "id": "workbench-plugins-git", "url": "https://github.com/nexuslbs/workbench-plugins.git", "ref": "main", "subdir": "plugins" }
+    { "kind": "path", "id": "external-plugins", "path": "../example-plugins/plugins" },
+    { "kind": "git", "id": "external-plugins-git", "url": "https://github.com/example/example-plugins.git", "ref": "main", "subdir": "plugins" }
   ],
   "plugins": { "hello-otherworld": { "message": "Hello Otherworld" } }
 }
@@ -135,7 +135,7 @@ The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /
 
 There is no per-plugin registration code: dropping a plugin directory into a
 configured source is the whole wiring. The loader is directory-driven, so a new
-plugin in `workbench-plugins` is picked up by the existing source without any
+plugin in an already-configured external source is picked up without any
 core change (no config entry needed beyond the source itself).
 
 ## 6. What must not be in the core
