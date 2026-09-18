@@ -7,7 +7,7 @@ import { CORE_PROVIDERS, registerCoreProviders } from './credentials/providers/i
 import { Host } from './host.ts'
 import { loadPlugins, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { CommandRegistry } from './registry.ts'
-import { WEB, DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, Web } from './web/definition.ts'
+import { WEB, DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, Web, type WebHandler } from './web/definition.ts'
 import { createWebServer, type WebServer } from './web/providers/http.ts'
 import type { ConfigApi, LoadedPlugin, Workbench, WorkbenchConfig } from './types.ts'
 
@@ -32,6 +32,12 @@ export interface StartWebOptions {
   host?: string
   /** Bind port (default 12348; `0` picks a free port). */
   port?: number
+  /**
+   * Handler the web provider calls when the seam does not answer (before its
+   * 404), so `serve` can keep its status endpoint on the same listener as the
+   * UI. Passing one does not change any seam registration.
+   */
+  fallback?: WebHandler
 }
 
 export interface Kernel {
@@ -276,6 +282,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
         host: start.host ?? DEFAULT_WEB_HOST,
         port: start.port ?? DEFAULT_WEB_PORT,
         log,
+        ...(start.fallback ? { fallback: start.fallback } : {}),
       })
       return webServer
     },

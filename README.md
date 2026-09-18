@@ -111,8 +111,12 @@ workbench: web UI on http://127.0.0.1:12348 (config <path>)
 
 - Bind: `--host` / `--port` flag, then `$WORKBENCH_WEB_HOST` / `$WORKBENCH_WEB_PORT`,
   then the `web:` section of the config, then `127.0.0.1:12348`.
-- `workbench serve` (the service mode) starts the SAME listener in the same
-  process when the config sets `web.enabled: true`.
+- `workbench serve` (the service mode) starts the web provider in the SAME
+  process when the config sets `web.enabled: true`. When the configured web port
+  equals the status port (`WORKBENCH_PORT`, default 12347) the two share ONE
+  listener: the browser UI, its shell/assets/routes AND `/health` (the status
+  JSON the compose healthcheck probes) all answer on that single port - which is
+  how the dev service serves the browser UI on the published 12347.
 - No auth this round: the default bind is loopback on purpose. Binding a
   non-loopback host exposes the UI to everyone who can reach it.
 
@@ -128,6 +132,7 @@ workbench: web UI on http://127.0.0.1:12348 (config <path>)
 | `workbench plugins --json` / `workbench commands --json` | Machine-readable variants. |
 | `--config <file>` | Use another config file; `.json`, `.yml` or `.yaml` (the extension selects the parser). |
 | `--port <n>` | `serve` only: status endpoint port (overrides `WORKBENCH_PORT`). |
+| `--web-port <n>` | `serve` only: Web UI port when the config enables the UI; set it to the status port to serve the UI and `/health` on ONE listener. |
 | `--no-external` | Skip external sources (only the core plugins load). |
 | `--help` | Usage. |
 
@@ -178,7 +183,21 @@ entry there):
   immediate subdirectories containing a `workbench.plugin.json` manifest.
   - `kind: "path"` - a local directory; `path` is relative to the config file.
   - `kind: "git"` - a git coordinate: `{ "kind": "git", "url": "...", "ref": "main", "subdir": "plugins" }`.
-    The checkout is cached under `.workbench/sources/<id>` (never committed).
+    The checkout is cached under `$WORKBENCH_CACHE_DIR/<id>` (default
+    `<config dir>/.workbench/sources/<id>`, never committed) and scanned like a
+    `path` source.
+    - `ref` accepts a BRANCH, a TAG or a COMMIT SHA (default: the remote HEAD).
+    - `subdir` selects the plugin subtree inside the checkout.
+    - The FIRST use clones through a staging directory and `rename`s it into
+      place, so a failed or interrupted clone never leaves a half-populated
+      source that would be scanned. An update is an in-place `fetch` plus a
+      forced detached `checkout` of the same `ref`.
+    - A source that cannot be resolved (bad url, unresolvable ref, missing git,
+      missing subdir) is an ERROR NAMING the source - `source 'id' (git <url> @
+      <ref>)` plus git's own stderr - and the loader SKIPS it, so stale or
+      partial code is never served silently.
+    - `workbench plugins` (and `--json`) report the resolved checkout path of
+      every source, so a fetched source is inspectable.
   - `id` - stable source id used in reports (defaults to the directory/repo name).
   - `external: false` - marks a core source; everything else counts as external
     (and is skipped by `--no-external`).
@@ -285,6 +304,12 @@ kernel state), `${env:VAR}` expansion in a YAML config, the default-file
 resolution order (yml > yaml > json) plus the repo default resolving to
 `workbench.config.yml`, malformed YAML naming the file, unknown extensions and
 non-string scalars in the validation messages.
+`test/sources.test.ts` covers `git` sources against temp git fixtures: the
+first-use clone (into a staging dir, moved into place) plus `subdir` scan and the
+fetched plugin really answering, in-place update for branch/tag/sha refs, a
+missing `subdir`, a bad url and an unresolvable ref (each naming the source and
+leaving no half-populated checkout behind), a leftover non-checkout directory
+being replaced, a missing git binary, and a `git` source without a url.
 
 ## License
 

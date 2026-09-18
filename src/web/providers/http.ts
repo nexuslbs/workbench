@@ -17,7 +17,14 @@
 import fs from 'node:fs'
 import http from 'node:http'
 import { markApplying } from '../../attribution.ts'
-import { DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, type Web, type WebRequest, type WebResponse } from '../definition.ts'
+import {
+  DEFAULT_WEB_HOST,
+  DEFAULT_WEB_PORT,
+  type Web,
+  type WebHandler,
+  type WebRequest,
+  type WebResponse,
+} from '../definition.ts'
 import { renderShell, SHELL_CSS, SHELL_JS } from './shell.ts'
 
 /** Request body cap (1 MiB): a route handler never buffers more than this. */
@@ -32,6 +39,15 @@ export interface WebServerOptions {
   log?: (message: string) => void
   /** Body cap in bytes (default {@link MAX_BODY_BYTES}). */
   maxBodyBytes?: number
+  /**
+   * Handler called when the seam itself does not answer a request (after the
+   * shell, the assets and the registered routes) and BEFORE the provider's JSON
+   * 404. It is how the composition root puts another endpoint on the SAME
+   * listener - `serve` keeps `/health` on the UI port when the config binds the
+   * UI to the status port, so one published port carries both. Returning
+   * nothing falls through to the 404.
+   */
+  fallback?: WebHandler
 }
 
 export interface WebServer {
@@ -119,6 +135,7 @@ export async function createWebServer(web: Web, options: WebServerOptions = {}):
   const port = options.port ?? DEFAULT_WEB_PORT
   const log = options.log ?? ((): void => undefined)
   const cap = options.maxBodyBytes ?? MAX_BODY_BYTES
+  const fallback = options.fallback
 
   // The page index the shell mounts from: provider owned, disposed on close.
   const restore = markApplying('web')
@@ -168,6 +185,11 @@ export async function createWebServer(web: Web, options: WebServerOptions = {}):
         const dispatched = await web.dispatch(buildRequest(request, url, cap))
         if (dispatched) {
           send(response, method, dispatched)
+          return
+        }
+        const fellThrough = fallback ? await fallback(buildRequest(request, url, cap)) : undefined
+        if (fellThrough) {
+          send(response, method, fellThrough)
           return
         }
         send(response, method, {

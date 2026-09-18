@@ -6,7 +6,7 @@ import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
 import { CREDENTIALS_CONTRACT, parseCredentialRef, refLabel } from './credentials/definition.ts'
 import { createKernel, type Kernel } from './kernel.ts'
 import type { LoadedPlugin } from './types.ts'
-import { DEFAULT_WEB_HOST, DEFAULT_WEB_PORT } from './web/definition.ts'
+import { DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, type WebHandler } from './web/definition.ts'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** Directory of the core package, the fallback location of the default config. */
@@ -43,7 +43,9 @@ Options:
   --port <n>       serve: status endpoint port (default: $WORKBENCH_PORT or ${DEFAULT_PORT});
                    web: Web UI port (default: $WORKBENCH_WEB_PORT, the config, else ${DEFAULT_WEB_PORT})
   --host <h>       Web UI listener host (default: $WORKBENCH_WEB_HOST, the config, else ${DEFAULT_WEB_HOST})
-  --web-port <n>   serve only: Web UI port when the config enables the UI
+  --web-port <n>   serve only: Web UI port when the config enables the UI;
+                   set it to the status port (--port) to serve the UI AND
+                   /health on ONE listener
   --no-external    skip external plugin sources
   --json           machine readable output
   --help           this text
@@ -255,17 +257,14 @@ async function credentialsCommand(kernel: Kernel, flags: Flags): Promise<void> {
 async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> {
   // The Web UI attaches to THIS process: `serve` is the single long-running
   // entrypoint of the service, so when the config enables the UI the core web
-  // provider starts here too (its own listener; the status endpoint and its
-  // port are untouched). One process, two listeners.
+  // provider starts here too. When the configured WEB port IS the status port
+  // both live on ONE listener: the provider serves the UI and hands the status
+  // path to the fallback below, so the published port carries the browser UI and
+  // the healthcheck together. Different ports keep the two-listener setup.
   const webConfig = kernel.config.web ?? {}
-  let webServer: Awaited<ReturnType<Kernel['startWeb']>> | undefined
-  if (webConfig.enabled === true) {
-    webServer = await kernel.startWeb({
-      host: resolveWebHost(flags.host, webConfig.host),
-      port: resolveWebPort(flags.webPort, webConfig.port),
-    })
-    process.stdout.write(`workbench: web UI on ${webServer.url} (web.enabled in the config)\n`)
-  }
+  const webEnabled = webConfig.enabled === true
+  const webPort = webEnabled ? resolveWebPort(flags.webPort, webConfig.port) : undefined
+  const merged = webEnabled && webPort === port
   const status = (): string =>
     JSON.stringify(
       {
@@ -281,7 +280,29 @@ async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> 
       2,
     )
 
-  const server = http.createServer((request, response) => {
+  /** The status endpoint, riding the UI listener when the two share a port. */
+  const statusFallback: WebHandler = (request) => {
+    if (request.method !== 'GET' && request.method !== 'HEAD') return undefined
+    if (request.path !== '/health' && request.path !== '/healthz') return undefined
+    return { contentType: 'application/json; charset=utf-8', body: status() + '\n' }
+  }
+
+  let webServer: Awaited<ReturnType<Kernel['startWeb']>> | undefined
+  if (webEnabled) {
+    webServer = await kernel.startWeb({
+      host: resolveWebHost(flags.host, webConfig.host),
+      port: webPort,
+      ...(merged ? { fallback: statusFallback } : {}),
+    })
+    process.stdout.write(
+      merged
+        ? `workbench: web UI on ${webServer.url} (web.enabled; one listener with the status endpoint, /health answers there too)\n`
+        : `workbench: web UI on ${webServer.url} (web.enabled in the config)\n`,
+    )
+  }
+
+  /** The plain status listener: the JSON status on `/health`, `/` and `/?...`. */
+  const handleStatus = (request: http.IncomingMessage, response: http.ServerResponse): void => {
     const url = request.url ?? '/'
     if (url === '/health' || url === '/' || url.startsWith('/?')) {
       response.writeHead(200, { 'content-type': 'application/json' })
@@ -290,14 +311,19 @@ async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> 
     }
     response.writeHead(404, { 'content-type': 'application/json' })
     response.end(JSON.stringify({ status: 'not found', path: url }) + '\n')
-  })
+  }
 
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(port, '0.0.0.0', resolve)
-  })
+  // Merged: the UI listener owns the port and the status endpoint rides on it
+  // (through the fallback). Not merged: the status listener is alone on it.
+  const server = merged ? undefined : http.createServer(handleStatus)
 
-  process.stdout.write(`workbench: serving on http://0.0.0.0:${port} config=${kernel.configFile}\n`)
+  if (server) {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(port, '0.0.0.0', resolve)
+    })
+    process.stdout.write(`workbench: serving on http://0.0.0.0:${port} config=${kernel.configFile}\n`)
+  }
   process.stdout.write(summaryLine(kernel) + '\n')
   for (const source of kernel.sources) process.stdout.write(describeSource(source) + '\n')
   for (const plugin of kernel.plugins) process.stdout.write(`  ${describePlugin(plugin)}\n`)
@@ -318,7 +344,7 @@ async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> 
     process.once('SIGTERM', stop)
   })
   clearInterval(heartbeat)
-  await new Promise<void>((resolve) => server.close(() => resolve()))
+  if (server) await new Promise<void>((resolve) => server.close(() => resolve()))
   if (webServer) await webServer.close()
 }
 

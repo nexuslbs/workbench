@@ -239,8 +239,16 @@ The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /
 ```
 
 - `path` sources are local directories (`path` relative to the config file).
-- `git` sources are cloned/fetched into `.workbench/sources/<id>` (git required)
-  and then scanned like a path source (`subdir` selects the plugin directory).
+- `git` sources are cloned/fetched into `$WORKBENCH_CACHE_DIR/<id>` (default
+  `<config dir>/.workbench/sources/<id>`; git is required) and then scanned like
+  a path source (`subdir` selects the plugin directory). `ref` accepts a branch,
+  a tag or a commit sha (default: the remote HEAD). The first use clones into a
+  staging directory and renames it into place, so an interrupted clone can never
+  be scanned (and a leftover directory that is not a checkout is removed before
+  cloning); later runs `fetch` and force a detached `checkout` of the same ref.
+  A source that fails to resolve is reported with its id, url, ref and git's own
+  stderr - and SKIPPED, so stale code is never loaded silently. The resolved
+  checkout path is part of the loader inventory (`workbench plugins`, `--json`).
 - `external: false` marks a core source; every other source is external and is
   skipped by `--no-external`.
 - Without `--config` the core looks for `workbench.config.yml`, then
