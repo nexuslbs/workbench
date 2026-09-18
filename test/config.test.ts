@@ -1,45 +1,53 @@
 // Unit/behaviour tests of the config loader: extension driven parsing (JSON and
-// YAML), default-file resolution order, ${env:VAR} expansion for YAML, and the
-// errors a broken or unknown-format config must produce. The end-to-end kernel
-// tests live in kernel.test.ts.
+// YAML), default-file resolution order, ${env:VAR} expansion, and the errors a
+// broken or unknown-format config must produce. The end-to-end kernel tests live
+// in kernel.test.ts.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
-import { DEFAULT_CONFIG_FILES, configFormat, findDefaultConfigFile, readConfig, resolveDefaultConfigFile } from '../src/config.ts'
+import {
+  DEFAULT_CONFIG_FILES,
+  configFormat,
+  findDefaultConfigFile,
+  readConfig,
+  resolveDefaultConfigFile,
+} from '../src/config.ts'
 import { createKernel } from '../src/kernel.ts'
+import { DEFAULT_CONFIG, EXAMPLE_CONFIG, ROOT, externalFixture } from './fixtures.ts'
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const JSON_CONFIG = path.join(ROOT, 'workbench.config.json')
-const YAML_CONFIG = path.join(ROOT, 'workbench.config.example.yml')
 const quiet = (): void => undefined
 
 function tempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`))
 }
 
-test('a YAML config yields the same kernel state as the JSON one (parity)', async () => {
-  const fromJson = readConfig(JSON_CONFIG)
-  const fromYaml = readConfig(YAML_CONFIG)
-  assert.deepEqual(fromYaml.config, fromJson.config)
-  assert.equal(fromYaml.dir, ROOT)
-  assert.equal(fromYaml.file, YAML_CONFIG)
-
-  const json = await createKernel({ configFile: JSON_CONFIG, log: quiet })
-  const yaml = await createKernel({ configFile: YAML_CONFIG, log: quiet })
+test('a YAML config yields the same kernel state as the equivalent JSON one (parity)', async () => {
+  const fixture = externalFixture()
+  const fromYaml = readConfig(fixture.yml)
+  const fromJson = readConfig(fixture.json)
   try {
-    assert.deepEqual(
-      yaml.plugins.map((plugin) => [plugin.name, plugin.source, plugin.external]),
-      json.plugins.map((plugin) => [plugin.name, plugin.source, plugin.external]),
-    )
-    assert.equal(await yaml.registry.resolve(['hello', 'otherworld'])?.command.run([]), 'Hello Otherworld')
-    assert.equal(await json.registry.resolve(['hello', 'otherworld'])?.command.run([]), 'Hello Otherworld')
+    assert.deepEqual(fromYaml.config, fromJson.config)
+    assert.equal(fromYaml.dir, fromJson.dir)
+    assert.equal(fromYaml.file, fixture.yml)
+
+    const yaml = await createKernel({ configFile: fixture.yml, log: quiet })
+    const json = await createKernel({ configFile: fixture.json, log: quiet })
+    try {
+      assert.deepEqual(
+        yaml.plugins.map((plugin) => [plugin.name, plugin.source, plugin.external]),
+        json.plugins.map((plugin) => [plugin.name, plugin.source, plugin.external]),
+      )
+      assert.equal(await yaml.registry.resolve(['hello', 'otherworld'])?.command.run([]), 'Hello Otherworld')
+      assert.equal(await json.registry.resolve(['hello', 'otherworld'])?.command.run([]), 'Hello Otherworld')
+    } finally {
+      await yaml.dispose()
+      await json.dispose()
+    }
   } finally {
-    await yaml.dispose()
-    await json.dispose()
+    fs.rmSync(fixture.dir, { recursive: true, force: true })
   }
 })
 
@@ -74,9 +82,11 @@ test('default config resolution prefers .yml, then .yaml, then .json', () => {
   assert.equal(path.basename(resolveDefaultConfigFile(dir) ?? ''), 'workbench.config.yml')
 })
 
-test('a repo that ships only workbench.config.json resolves to it (backwards compatible)', () => {
-  assert.equal(resolveDefaultConfigFile(ROOT), JSON_CONFIG)
-  assert.equal(findDefaultConfigFile([ROOT]), JSON_CONFIG)
+test('the repo default config is workbench.config.yml (core-only)', () => {
+  assert.equal(resolveDefaultConfigFile(ROOT), DEFAULT_CONFIG)
+  assert.equal(findDefaultConfigFile([ROOT]), DEFAULT_CONFIG)
+  const loaded = readConfig(DEFAULT_CONFIG)
+  assert.deepEqual(loaded.config.sources.map((source) => [source.id, source.kind, source.external]), [['core', 'path', false]])
 })
 
 test('a missing default config names every candidate file', () => {
@@ -127,12 +137,12 @@ test('non-string YAML scalars are reported by the validation messages', () => {
 })
 
 test('CLI (documented smoke) boots from the YAML example config', () => {
-  const listed = spawnSync(process.execPath, ['src/cli.ts', '--config', 'workbench.config.example.yml', 'plugins'], { cwd: ROOT, encoding: 'utf8' })
+  const listed = spawnSync(process.execPath, ['src/cli.ts', '--config', EXAMPLE_CONFIG, 'plugins'], { cwd: ROOT, encoding: 'utf8' })
   assert.equal(listed.status, 0, listed.stderr)
+  assert.match(listed.stdout, /workbench: 1 plugin\(s\) loaded \(1 core, 0 external\)/)
   assert.match(listed.stdout, /hello-world@0\.1\.0\s+core/)
-  assert.match(listed.stdout, /hello-otherworld@0\.1\.0\s+external:workbench-plugins/)
 
-  const hello = spawnSync(process.execPath, ['src/cli.ts', '--config', 'workbench.config.example.yml', 'hello', 'otherworld'], { cwd: ROOT, encoding: 'utf8' })
+  const hello = spawnSync(process.execPath, ['src/cli.ts', '--config', EXAMPLE_CONFIG, 'hello', 'world'], { cwd: ROOT, encoding: 'utf8' })
   assert.equal(hello.status, 0, hello.stderr)
-  assert.equal(hello.stdout.trim(), 'Hello Otherworld')
+  assert.equal(hello.stdout.trim(), 'Hello World')
 })

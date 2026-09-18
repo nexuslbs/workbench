@@ -13,6 +13,7 @@
   },
   "scripts": {
     "dev": "node src/cli.ts",
+    "serve": "node src/cli.ts serve",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.ts"
   },

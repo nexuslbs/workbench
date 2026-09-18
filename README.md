@@ -22,61 +22,91 @@ Stack: Node + TypeScript on cordis, no build step (Node >= 22.18 strips the type
 
 ```bash
 git clone https://github.com/nexuslbs/workbench.git
-git clone https://github.com/nexuslbs/workbench-plugins.git   # sibling dir: the default external source
 cd workbench
 npm install
 npm test
 ```
 
-Boot the host and see both the core plugin and the external plugin:
+The core repo is self-contained: its default config (`workbench.config.yml`)
+declares the core plugins that ship with it and nothing else, so it boots with
+no plugin repository present.
 
 ```bash
 npm run dev -- plugins         # lists the loaded plugins and their sources
-npm run dev -- hello world     # -> Hello World          (core plugin)
-npm run dev -- hello otherworld # -> Hello Otherworld    (external plugin)
+npm run dev -- hello world     # -> Hello World (core plugin)
+npm run dev -- serve           # long-running service mode (see below)
 ```
 
 Raw output of the documented smoke command:
 
 ```console
 $ npm run dev -- plugins
-[workbench] loaded plugin hello-world@0.1.0 from core (core)
-[workbench] loaded plugin hello-otherworld@0.1.0 from workbench-plugins (external)
-workbench: 2 plugin(s) loaded (1 core, 1 external)
+workbench: 1 plugin(s) loaded (1 core, 0 external)
 source core (path, core): /path/to/workbench/plugins [1 plugin(s)]
-source workbench-plugins (path, external): /path/to/workbench-plugins/plugins [1 plugin(s)]
   hello-world@0.1.0  core  [command:hello world]
-  hello-otherworld@0.1.0  external:workbench-plugins  [command:hello otherworld]
 
 $ npm run dev -- hello world
-[workbench] loaded plugin hello-world@0.1.0 from core (core)
-[workbench] loaded plugin hello-otherworld@0.1.0 from workbench-plugins (external)
 Hello World
-
-$ npm run dev -- hello otherworld
-[workbench] loaded plugin hello-world@0.1.0 from core (core)
-[workbench] loaded plugin hello-otherworld@0.1.0 from workbench-plugins (external)
-Hello Otherworld
 ```
 
-The same boot from the YAML example config (the default lookup prefers
-`workbench.config.yml` / `.yaml` over `.json`):
+Load an EXTERNAL plugin repository by declaring it in your config (consumed as
+an external source, never vendored into this repo) - a sibling checkout
+(`kind: path`) or, in production, a git coordinate (`kind: git`):
+
+```yaml
+sources:
+  - kind: path
+    id: core
+    path: ./plugins
+    external: false
+  - kind: git
+    id: workbench-plugins
+    url: https://github.com/nexuslbs/workbench-plugins
+    ref: main
+    subdir: plugins
+```
 
 ```bash
-npm run dev -- --config workbench.config.example.yml plugins
+npm run dev -- --config /path/to/that/config.yml plugins
+CONFIG_FILE=/path/to/that/config.yml npm run dev -- plugins   # same thing
 ```
 
 Plugin loading messages go to stderr, command output to stdout.
+
+## Service mode (`serve`)
+
+`workbench serve` boots the plugins, serves a tiny status endpoint
+(`GET /health` -> the config file, the loaded plugins and their sources) and
+stays up until `SIGINT`/`SIGTERM`. It is what the compose service runs, so the
+container is `Up` because it hosts something, not because it sleeps.
+
+```console
+$ npm run dev -- serve
+workbench: serving on http://0.0.0.0:12347 config=/path/to/workbench.config.yml
+workbench: 1 plugin(s) loaded (1 core, 0 external)
+source core (path, core): /path/to/workbench/plugins [1 plugin(s)]
+  hello-world@0.1.0  core  [command:hello world]
+```
+
+Environment (all optional):
+
+| Variable | Meaning |
+| --- | --- |
+| `CONFIG_FILE` | Config file to use when `--config` is not given; empty/unset = the default lookup described below. |
+| `WORKBENCH_PORT` | Port of the `serve` status endpoint (default `12347`); `--port` wins. |
+| `WORKBENCH_CACHE_DIR` | Where `git` plugin sources are checked out (default `<config dir>/.workbench/sources`). |
 
 ## CLI
 
 | Command | Description |
 | --- | --- |
+| `workbench serve` | Boot the plugins and keep running (service mode; status endpoint on `--port` / `WORKBENCH_PORT`, default 12347). |
 | `workbench <command> [args...]` | Run the command registered by a plugin (longest match wins, the rest becomes args). |
 | `workbench plugins` | List loaded plugins, their source and their capabilities. |
 | `workbench commands` | List the registered commands (and the plugin that registered them). |
 | `workbench plugins --json` / `workbench commands --json` | Machine-readable variants. |
 | `--config <file>` | Use another config file; `.json`, `.yml` or `.yaml` (the extension selects the parser). |
+| `--port <n>` | `serve` only: status endpoint port (overrides `WORKBENCH_PORT`). |
 | `--no-external` | Skip external sources (only the core plugins load). |
 | `--help` | Usage. |
 
@@ -91,7 +121,8 @@ error, the core never guesses). Without `--config` the core looks for, in order,
 working directory and then next to the core; the first existing file wins and a
 missing config names all three candidates.
 
-YAML, with comments:
+YAML, with comments - this is the shipped default: core-only, with the external
+source as a commented EXAMPLE (the core never depends on a plugin repository):
 
 ```yaml
 # workbench.config.yml
@@ -101,28 +132,24 @@ sources:
     id: core
     path: ./plugins
     external: false
-  # external plugin repository (sibling checkout by default)
-  - kind: path
-    id: workbench-plugins
-    path: ../workbench-plugins/plugins
+  # EXAMPLE - an external repository of plugins:
+  # - kind: git
+  #   id: workbench-plugins
+  #   url: https://github.com/nexuslbs/workbench-plugins
+  #   ref: main
+  #   subdir: plugins
 
 plugins:
   hello-world: { message: Hello World }
-  hello-otherworld: { message: Hello Otherworld }
 ```
 
-The equivalent JSON:
+The same schema in JSON (JSON has no comments, so an external source is a real
+entry there):
 
 ```json
 {
-  "sources": [
-    { "kind": "path", "id": "core", "path": "./plugins", "external": false },
-    { "kind": "path", "id": "workbench-plugins", "path": "../workbench-plugins/plugins" }
-  ],
-  "plugins": {
-    "hello-world": { "message": "Hello World" },
-    "hello-otherworld": { "message": "Hello Otherworld" }
-  }
+  "sources": [{ "kind": "path", "id": "core", "path": "./plugins", "external": false }],
+  "plugins": { "hello-world": { "message": "Hello World" } }
 }
 ```
 
@@ -166,9 +193,10 @@ workbench/
   plugins/
     hello-world/  core test plugin (loaded through the plugin-source mechanism)
   test/
-    kernel.test.ts  load-and-run tests, incl. CLI end to end
-  workbench.config.json         default config (JSON)
-  workbench.config.example.yml  the same config in YAML (for `--config`)
+    kernel.test.ts  load-and-run tests, incl. CLI end to end and `serve`
+    fixtures.ts     temp external-plugin fixture (no sibling checkout needed)
+  workbench.config.yml          default config (core-only YAML, external EXAMPLE commented out)
+  workbench.config.example.yml  the same core-only config (for `--config`)
   docs/PLUGIN-CONTRACT.md
 ```
 
@@ -190,16 +218,20 @@ npm test        # node --test test/*.test.ts
 npm run typecheck
 ```
 
-`test/kernel.test.ts` boots the kernel with the real config, asserts that both
-plugins are loaded (the external one with `source: workbench-plugins`), that both
-commands produce their greeting, and that the CLI prints `Hello Otherworld`. A
-second test boots with `includeExternal: false` and asserts the external plugin
-disappears - so the suite fails when the external plugin is not loaded.
+`test/kernel.test.ts` boots the kernel with the default (core-only) config and
+asserts nothing external is loaded, then with a temp FIXTURE source: the core
+plugin and the external fixture plugin load through the same mechanism (the
+external one with `source: workbench-plugins`), both commands produce their
+greeting, and the CLI prints `Hello Otherworld`. It also covers
+`includeExternal: false`, `CONFIG_FILE` selection (empty = default) and that
+`serve` answers `/health` and stays up until `SIGTERM`. The fixture lives in
+`test/fixtures.ts` and is created in a temp dir, so the suite needs no sibling
+`workbench-plugins` checkout.
 `test/config.test.ts` covers the loader itself: YAML/JSON parity (config and
 kernel state), `${env:VAR}` expansion in a YAML config, the default-file
-resolution order (yml > yaml > json, and a json-only repo still resolving to its
-json), malformed YAML naming the file, unknown extensions and non-string scalars
-in the validation messages.
+resolution order (yml > yaml > json) plus the repo default resolving to
+`workbench.config.yml`, malformed YAML naming the file, unknown extensions and
+non-string scalars in the validation messages.
 
 ## License
 

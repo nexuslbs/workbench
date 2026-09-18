@@ -1,0 +1,32 @@
+# workbench core - default config.
+#
+# It lists the CORE plugins that ship with this repository and nothing else: the
+# core has NO dependency on any plugin repository and boots fine with external
+# sources absent. Relative `path` sources resolve against this file's directory.
+sources:
+  # core plugins that ship with this repository
+  - kind: path
+    id: core
+    path: ./plugins
+    external: false
+
+# EXAMPLE - how an EXTERNAL repository of plugins is declared (commented out on
+# purpose: the core never depends on the plugins repository - uncomment and
+# adapt to actually load one):
+#
+#  # remote (git) source - the production form: cloned once, then cached
+#  - kind: git
+#    id: workbench-plugins
+#    url: https://github.com/nexuslbs/workbench-plugins
+#    ref: main
+#    subdir: plugins
+#
+#  # local source - handy during development (a sibling checkout, no network)
+#  - kind: path
+#    id: workbench-plugins
+#    path: ../workbench-plugins/plugins
+
+plugins:
+  # per-plugin config, keyed by plugin name
+  hello-world:
+    message: Hello World
