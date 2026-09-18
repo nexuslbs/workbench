@@ -8,7 +8,7 @@
 //  - `serve` is a real long-running entrypoint (it answers /health and stays up).
 //
 // The external plugin is a fixture in a temp dir: the core repo has no
-// dependency on the `workbench-plugins` repository.
+// dependency on any plugins repository.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -39,8 +39,8 @@ test('loads the core plugin and an external fixture plugin, and runs both greeti
     assert.deepEqual(names, ['hello-otherworld', 'hello-world'])
 
     const external = kernel.plugins.find((plugin) => plugin.name === 'hello-otherworld')
-    assert.ok(external, 'hello-otherworld must be loaded from the external source workbench-plugins')
-    assert.equal(external.source, 'workbench-plugins')
+    assert.ok(external, 'hello-otherworld must be loaded from the external source external-plugins')
+    assert.equal(external.source, 'external-plugins')
     assert.equal(external.external, true)
     assert.equal(external.dir, fixture.sourceDir)
 
@@ -77,7 +77,7 @@ test('CLI (documented smoke): hello otherworld comes from the external plugin', 
 
     const listed = spawnSync(process.execPath, ['src/cli.ts', '--config', fixture.yml, 'plugins'], { cwd: ROOT, encoding: 'utf8' })
     assert.equal(listed.status, 0, listed.stderr)
-    assert.match(listed.stdout, /hello-otherworld@0\.1\.0\s+external:workbench-plugins/)
+    assert.match(listed.stdout, /hello-otherworld@0\.1\.0\s+external:external-plugins/)
   } finally {
     fs.rmSync(fixture.dir, { recursive: true, force: true })
   }
@@ -103,7 +103,7 @@ test('CLI: CONFIG_FILE selects the config file, an empty value keeps the default
       env: { ...process.env, CONFIG_FILE: fixture.yml },
     })
     assert.equal(fromEnv.status, 0, fromEnv.stderr)
-    assert.match(fromEnv.stdout, /hello-otherworld@0\.1\.0\s+external:workbench-plugins/)
+    assert.match(fromEnv.stdout, /hello-otherworld@0\.1\.0\s+external:external-plugins/)
 
     const empty = spawnSync(process.execPath, ['src/cli.ts', 'plugins'], {
       cwd: ROOT,
