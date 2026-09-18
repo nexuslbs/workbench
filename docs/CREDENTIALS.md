@@ -144,3 +144,145 @@ is the only place that knows both sides):
 by a manifest: **the manifest declaration is what makes a provider resolvable**.
 This is additive - a manifest that uses the short string form
 (`"capabilities": ["command:hello world"]`) keeps loading exactly as before.
+
+## 4. Referencing a credential from config (`${cred:NAME}`)
+
+The config loader is a CONSUMER: it resolves through the credentials service and
+never imports a provider. Anywhere a STRING config value is accepted, the
+following references are expanded:
+
+```
+${cred:NAME}          ${secret:NAME}          ${cred:SCOPE/NAME}
+```
+
+`cred` and `secret` are aliases with byte-identical behaviour.
+
+Rules:
+
+- The reference body is trimmed; `SCOPE/NAME` is split at the FIRST `/`, so
+  `team/deploy-token` resolves with scope `team` and name `deploy-token`
+  (a provider that ignores scopes still answers for the name - see section 2).
+- An EMPTY reference (`${cred:}` / `${secret:  }`) is a config error.
+- An unresolvable reference is a HARD error naming the reference and the enabled
+  providers tried, never a value:
+
+  ```
+  config: credential 'deploy-token' could not be resolved by the enabled provider(s) env, file; check the credential name and the 'credentials' section of the config
+  ```
+
+- `credentials.scope` (section 3) is a FALLBACK, not an override: an unscoped
+  reference is looked up UNSCOPED first (a flat `env` value, `document[NAME]` in
+  the file provider) and only when that misses is it looked up again as
+  `SCOPE/NAME`. `${cred:NAME}` therefore keeps working for a top-level
+  credential, while unscoped references can still reach a scoped one. When the
+  fallback was tried, the error message says so
+  (`(the default scope 'team' was tried as well)`).
+- `${env:VAR}` is expanded earlier, with its own pattern, and behaves exactly as
+  before - the two kinds of reference may appear in the same file and in the
+  same value.
+- A resolved value is inserted into the config in memory only. It is never
+  written back to disk, never logged and never named in an error: the CLI masks
+  it (`****`) and messages carry the reference, not the value.
+
+```yaml
+credentials:
+  providers: [env, file]
+  scope: team            # fallback for unscoped references
+
+plugins:
+  hello-world:
+    # resolved through the credentials service, provider agnostic
+    message: "token is ${cred:DEPLOY_TOKEN}"   # or ${secret:DEPLOY_TOKEN}
+    scoped: "team is ${cred:team/deploy-token}"
+```
+
+`${env:VAR}` remains the way to inject NON-secret environment values; use
+`${cred:NAME}` for anything that is a credential, so a provider can be swapped
+without touching the consumer.
+
+## 5. Adding an external provider (Vault-style example, step by step)
+
+A provider from ANOTHER repository is added without a single core change. The
+working example is `nexuslbs/workbench-plugins`, plugin
+`plugins/credentials-stub` (a Vault-KV-v2-style HTTP backend); the steps below
+are exactly what that plugin does.
+
+**1. Author the plugin in the external repo** (never in the core): a plugin
+directory with a `workbench.plugin.json` manifest, an entry file exporting the
+cordis plugin (`apply(ctx, config)`), a README and a test. Import the contract
+types from the core's public API (`src/index.ts` re-exports the Definition) so
+the provider implements the documented interface.
+
+**2. Declare the capability in the manifest.** This declaration is what makes
+the provider resolvable - `ctx.credentials.register()` refuses a provider whose
+id was not declared by a manifest:
+
+```json
+{
+  "name": "credentials-stub",
+  "version": "0.1.0",
+  "entry": "index.ts",
+  "capabilities": [{ "id": "credentials", "version": 1, "provider": "stub-vault" }]
+}
+```
+
+The `capabilities` field is ADDITIVE: a manifest using the short string form
+(`"capabilities": ["command:hello world"]`) keeps loading unchanged.
+
+**3. Implement the contract** (section 1) in the plugin: a provider object with
+`id` (must match the manifest `provider`), `version` (must equal `1`), and
+`resolve(ref)`; `list()` / `describe()` are optional. `resolve` returns
+`undefined` for "not found" and THROWS for a real failure.
+
+**4. Register it when the plugin is applied**, e.g. in `apply(ctx, config)`:
+`ctx.credentials.register(provider)` (`ctx.credentials` is typed by the
+Definition's `declare module 'cordis'` augmentation).
+
+**5. Wire the external source into the workbench config** (the source is an
+ordinary external source, exactly like any other plugin):
+
+```yaml
+sources:
+  - kind: path            # or kind: git in production
+    id: workbench-plugins
+    path: ../workbench-plugins/plugins
+    external: true
+```
+
+**6. Select it - one config row, no code change:**
+
+```yaml
+credentials:
+  providers: [stub-vault]   # selection is configuration only
+```
+
+A declared, registered provider that is not enabled never answers; it still
+appears in `workbench credentials providers` with `enabled: false`.
+
+**7. Give it its own configuration** under `plugins:<plugin name>` (here: the
+endpoint, the mount and an optional token - never a credential VALUE):
+
+```yaml
+plugins:
+  credentials-stub:
+    url: http://127.0.0.1:8200
+```
+
+**8. Use it from the SAME consumer, unchanged.** Any config value with
+`${cred:NAME}` (section 4) or any plugin calling
+`ctx.credentials.resolve({ name })` is served by the external provider. A
+consumer never imports a provider, so swapping `credentials.providers` between a
+core provider and `stub-vault` changes the answer and nothing else.
+
+**9. Verify** with the CLI rather than by reading code:
+
+```sh
+workbench credentials providers            # lists providers, their contract, source, enabled
+workbench credentials resolve deploy-token  # prints the value masked and the provider that answered
+workbench credentials explain deploy-token  # per-provider trace: answered / missing / error
+```
+
+**10. Hygiene:** the provider must not log, echo or persist values and its errors
+must name the endpoint and the reference, never the value (section 4). Keep real
+tokens in the provider's own configuration as `${env:VAR}` / `${secret:NAME}`
+references; never commit them.

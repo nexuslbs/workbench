@@ -187,6 +187,13 @@ plugins:
     message: "token is ${cred:DEPLOY_TOKEN}"   # or ${secret:DEPLOY_TOKEN}
 ```
 
+A reference may also carry a scope (`${cred:SCOPE/NAME}`); `credentials.scope`
+is a fallback for unscoped references, looked up only after the unscoped form
+missed. Adding an external provider (e.g. a Vault-backed one) needs no core
+change: a manifest capability declaration plus a `sources:` row and a
+`credentials.providers:` row - see
+[docs/CREDENTIALS.md](docs/CREDENTIALS.md) section 5.
+
 Providers are selected by configuration only: swapping one is a config edit.
 Credential values are never logged, printed or persisted - the CLI masks them
 and errors name the reference, never the value.

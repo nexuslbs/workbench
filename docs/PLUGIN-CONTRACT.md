@@ -124,7 +124,25 @@ four core providers (`env`, `file`, `project-env`, `user-env`):
   ```
 
   The string form (`"capabilities": ["command:hello world"]`) keeps working:
-  the capability field is additive.
+  the capability field is additive. An external provider is then wired as an
+  ordinary external source and selected by configuration only (step-by-step
+  recipe in [CREDENTIALS.md](CREDENTIALS.md) section 5; working example:
+  `nexuslbs/workbench-plugins` `plugins/credentials-stub`, a Vault-style HTTP
+  backend):
+
+  ```yaml
+  sources:
+    - kind: path            # or kind: git in production
+      id: workbench-plugins
+      path: ../workbench-plugins/plugins
+      external: true
+
+  credentials:
+    providers: [vault]      # selection is configuration only
+  ```
+
+  No core change is involved: the manifest declaration above plus these two
+  config rows are the whole wiring.
 - **Consumer**: uses the capability through `ctx.credentials` (or the config
   `${cred:NAME}` / `${secret:NAME}` references). A consumer never imports a
   provider, and a provider never imports a consumer.

@@ -10,7 +10,7 @@ export const MANIFEST_FILE = 'workbench.plugin.json'
  *   "capabilities": [{ "id": "credentials", "version": 1, "provider": "vault" }]
  *
  * The short form is equivalent to `{ id: '<string>' }`. The structured form is
-the ADDITIVE extension the credentials seam uses: `id` is the capability id,
+ * the ADDITIVE extension the credentials seam uses: `id` is the capability id,
  * `version` the contract version the plugin implements and `provider` the
  * provider id the plugin registers with that capability (for capabilities that
  * are provided by several implementations). Manifests without the field keep
