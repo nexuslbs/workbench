@@ -237,13 +237,20 @@ test('bootstrap set: only core providers can be selected, and a plugin id is a l
   assert.deepEqual(bootstrapCredentials({ configDir: root, providers: ['file'] }).enabled(), ['file'])
   assert.throws(() => bootstrapCredentials({ configDir: root, providers: ['vault'] }), /is not a CORE provider/)
   assert.throws(() => bootstrapCredentials({ configDir: root, providers: ['env', 'env'] }), /listed twice/)
+})
 
 test('loader: a private git source is discovered with the auth resolved by the bootstrap set', async () => {
   const root = tmpRoot()
   const origin = makeRemote(root)
   process.env.WB_TEST_SOURCE_TOKEN = TOKEN
   const credentials = bootstrapCredentials({ configDir: root })
-  const config = { sources: [specFor(origin, { type: 'token', credential: 'WB_TEST_SOURCE_TOKEN' })] }
+  // The plugin lives under the repository's `plugins/` subtree, the same shape
+  // the dev config uses (`subdir: plugins`).
+  const spec = {
+    ...specFor(origin, { type: 'token', credential: 'WB_TEST_SOURCE_TOKEN' }),
+    subdir: 'plugins',
+  }
+  const config = { sources: [spec] }
   const sourceAuth = await resolveSourceAuths(config as never, { configDir: root, credentials })
 
   const report = discoverPlugins({
@@ -276,5 +283,4 @@ test('loader: a private git source is discovered with the auth resolved by the b
   assert.deepEqual(anonymous.discoveries, [])
   assert.match(anonymous.sources[0]?.error as string, /declares 'auth' but no credential was resolved/)
   assert.equal(fs.existsSync(path.join(root, 'cache-anonymous', 'private-local')), false)
-})
 })
