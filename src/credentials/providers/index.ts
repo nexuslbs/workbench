@@ -13,7 +13,7 @@
  * appear here.
  */
 import type { Context } from 'cordis'
-import type { CredentialsService } from '../definition.ts'
+import type { CredentialProvider, CredentialsService } from '../definition.ts'
 import * as env from './env.ts'
 import * as file from './file.ts'
 import * as projectEnv from './project-env.ts'
@@ -31,6 +31,12 @@ export interface CoreProvider {
   module: string
   /** Registers the provider, configured from `plugins[plugin]`. */
   register(ctx: Context & { credentials: CredentialsService }, raw: Record<string, unknown>, configDir: string): void
+  /**
+   * Creates the provider from the SAME config WITHOUT a cordis context: this is
+   * what the BOOTSTRAP set uses, because a source credential has to be resolvable
+   * before any plugin (and therefore before `ctx.credentials`) exists.
+   */
+  create(raw: Record<string, unknown>, configDir: string): CredentialProvider
 }
 
 /** How the kernel registers a provider module: one effect, one registration. */
@@ -45,24 +51,28 @@ export const CORE_PROVIDERS: CoreProvider[] = [
     plugin: env.name,
     module: 'src/credentials/providers/env.ts',
     register: (ctx, raw) => registerProvider(ctx, env.createProvider(env.resolveConfig(raw))),
+    create: (raw) => env.createProvider(env.resolveConfig(raw)),
   },
   {
     id: file.providerId,
     plugin: file.name,
     module: 'src/credentials/providers/file.ts',
     register: (ctx, raw, configDir) => registerProvider(ctx, file.createProvider(file.resolveConfig(raw, configDir))),
+    create: (raw, configDir) => file.createProvider(file.resolveConfig(raw, configDir)),
   },
   {
     id: projectEnv.providerId,
     plugin: projectEnv.name,
     module: 'src/credentials/providers/project-env.ts',
     register: (ctx, raw, configDir) => registerProvider(ctx, projectEnv.createProvider(projectEnv.resolveConfig(raw, configDir), configDir)),
+    create: (raw, configDir) => projectEnv.createProvider(projectEnv.resolveConfig(raw, configDir), configDir),
   },
   {
     id: userEnv.providerId,
     plugin: userEnv.name,
     module: 'src/credentials/providers/user-env.ts',
     register: (ctx, raw, configDir) => registerProvider(ctx, userEnv.createProvider(userEnv.resolveConfig(raw, configDir))),
+    create: (raw, configDir) => userEnv.createProvider(userEnv.resolveConfig(raw, configDir)),
   },
 ]
 

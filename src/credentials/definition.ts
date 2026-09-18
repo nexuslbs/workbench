@@ -375,6 +375,25 @@ export class Credentials extends CredentialsService {
 }
 
 /**
+ * The CONSUMER slice of the capability: what a consumer is allowed to call.
+ * {@link CredentialsService} satisfies it structurally, and so does the core's
+ * BOOTSTRAP set (`src/credentials/providers/bootstrap.ts`), which is built WITHOUT a cordis
+ * context because it must answer before any plugin is loaded (a `git` source is
+ * fetched before plugin discovery). A consumer depends on this interface - never
+ * on a provider.
+ */
+export interface CredentialConsumer {
+  /** Resolves a reference through the enabled providers (first answering wins). */
+  resolve(ref: CredentialRef): Promise<CredentialResolution | undefined>
+  /** What each enabled provider did for a reference (no values). */
+  explain(ref: CredentialRef): Promise<ResolutionTrace>
+  /** Credential names the enabled providers can answer (names only). */
+  list(): Promise<string[]>
+  /** Enabled provider ids, in precedence order. */
+  enabled(): string[]
+}
+
+/**
  * Typed handle for every consumer/provider module: `ctx.credentials`. Consumers
  * import the DEFINITION (never a provider) and get full typing from this.
  */

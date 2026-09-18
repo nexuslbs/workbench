@@ -268,3 +268,49 @@ The core is a host: cordis boot, source resolution, manifest discovery/loading,
 the command registry and the CLI. Anything that does actual work (deployments,
 publishing, providers, ...) belongs to a plugin. If a feature cannot be expressed
 as a plugin, the plugin contract - not the core - is what has to change.
+
+## Private sources (`git` + `auth`): a plugin repository that is not public
+
+A `git` source may declare `auth`, a credential REFERENCE (a NAME, never a value):
+
+```yml
+sources:
+  - kind: git
+    id: workbench-plugins-private
+    url: https://github.com/nexuslbs/workbench-plugins-private
+    ref: main
+    subdir: plugins
+    auth:
+      type: github-app
+      credential: GITHUB_APP_KEY   # resolved by the BOOTSTRAP credential set
+      appId: 3967918
+      installationId: 138119822
+```
+
+Contract:
+
+- The credential is resolved BEFORE the fetch, by the BOOTSTRAP set (core
+  providers `env`, `file`, `project-env`, `user-env`, selected/ordered by
+  `credentials.bootstrap`) - never by a plugin-provided provider, because source
+  resolution happens before plugin discovery. See `docs/CREDENTIALS.md`.
+- `type: token` (default) sends the value as a basic-auth `http.extraheader`;
+  `type: github-app` treats the value as an App PRIVATE KEY (PEM) and mints a
+  short-lived installation token (RS256 JWT -> `POST /app/installations/{id}/access_token`).
+- The credential is TRANSIENT: `-c credential.helper=` plus
+  `-c http.extraheader=...` on that single git command; the checkout's
+  `.git/config` keeps the plain configured url, no credential file is written, and
+  git arguments in errors/logs are redacted.
+- Everything else about `git` sources is unchanged (branch/tag/sha `ref`,
+  `subdir`, staged first clone, in-place update, per-source error reporting and
+  the loader inventory line).
+- A source that declares `auth` is never fetched anonymously: when its credential
+  is missing or wrong, the source is reported as an error
+  (`source '<id>' (git <url> @ <ref>): authentication failed: ...`) and SKIPPED,
+  while the other sources still load. A source may be PRIVATE while its plugin
+  contract stays the same as any other external plugin - no core-internal reach.
+- The key material is operator-provided at runtime and referenced by name only:
+  NEVER commit a PEM, token or generated credential file.
+
+Config shape (types): `SourceSpec.auth: { type?: 'token' | 'github-app';
+credential: string; username?: string; appId?: number | string;
+installationId?: number | string; apiBase?: string }`.

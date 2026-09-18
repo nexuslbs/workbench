@@ -23,7 +23,7 @@ import type { Context, Fiber } from 'cordis'
 import { readConfig } from './config.ts'
 import { readRawConfig, updateConfigFile } from './configfile.ts'
 import { discoverPlugins, loadDiscovered, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
-import { resolveSource } from './sources.ts'
+import { resolveSource, sourceId, type SourceAuthOutcome } from './sources.ts'
 import {
   renderCapability,
   type CommandInfo,
@@ -67,6 +67,19 @@ export interface HostOptions {
    * pass through the host).
    */
   pluginConfig?: (name: string, raw: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>
+  /**
+   * Source AUTH resolved before the boot walk (bootstrap credential set). A
+   * `git` source that declares `auth` is fetched with it; the host re-resolves
+   * it after a config change through {@link HostOptions.sourceAuthResolver}.
+   */
+  sourceAuth?: ReadonlyMap<string, SourceAuthOutcome>
+  /**
+   * Re-resolves source auth for a config: the BOOTSTRAP credential set
+   * (`src/credentials/providers/bootstrap.ts`) - core providers only, NO plugin loaded -
+   * because a source is fetched before plugin discovery. Injected by the kernel
+   * (composition root) so the host never names a provider.
+   */
+  sourceAuthResolver?: (config: WorkbenchConfig) => Promise<ReadonlyMap<string, SourceAuthOutcome>>
 }
 
 /** The slice of the core service the host needs (avoids an import cycle). */
@@ -92,11 +105,34 @@ export class Host implements HostApi {
   private entries = new Map<string, HostEntry>()
   private sourceReports: SourceReport[] = []
   private current: WorkbenchConfig
+  private sourceAuth: ReadonlyMap<string, SourceAuthOutcome>
 
   constructor(options: HostOptions) {
     this.options = options
     this.ctx = options.ctx
     this.current = options.config
+    this.sourceAuth = options.sourceAuth ?? new Map()
+  }
+
+  /**
+   * Re-resolves source auth from the current config. Runs after a config edit
+   * and BEFORE the refresh that walks the sources, so a newly installed private
+   * source is fetched with its credential (and a removed one is forgotten).
+   * Never throws: the resolver reports failures per source.
+   */
+  async refreshSourceAuths(): Promise<void> {
+    this.sourceAuth = await this.resolveAuths(this.rawConfig())
+  }
+
+  private async resolveAuths(config: WorkbenchConfig): Promise<ReadonlyMap<string, SourceAuthOutcome>> {
+    const resolver = this.options.sourceAuthResolver
+    if (resolver === undefined) return this.sourceAuth
+    try {
+      return await resolver(config)
+    } catch (error) {
+      this.options.log(`host: source auth could not be resolved (${error instanceof Error ? error.message : String(error)})`)
+      return this.sourceAuth
+    }
   }
 
   private registry(): RegistryLike {
@@ -243,6 +279,7 @@ export class Host implements HostApi {
     let ok = true
     try {
       message = await mutate(state)
+      await this.refreshSourceAuths()
     } catch (error) {
       ok = false
       message = `${action} '${target}' failed: ${error instanceof Error ? error.message : String(error)}`
@@ -259,6 +296,7 @@ export class Host implements HostApi {
       configDir: this.options.configDir,
       cacheDir: this.options.cacheDir,
       includeExternal: this.options.includeExternal,
+      sourceAuth: this.sourceAuth,
       log: this.options.log,
     })
     this.sourceReports = found.sources
@@ -431,7 +469,11 @@ export class Host implements HostApi {
       }
       // Resolving the source before persisting it validates the coordinate (a
       // git source is checked out into the cache here, by the loader, not by us).
-      const resolved = resolveSource(spec, this.options.configDir, this.options.cacheDir)
+      // The new source goes into a CANDIDATE config first so its own `auth` (a
+      // private git source) is resolved by the BOOTSTRAP set before the fetch.
+      const candidate: WorkbenchConfig = { ...raw, sources: [...raw.sources, spec] }
+      const auth = (await this.resolveAuths(candidate)).get(sourceId(spec, this.options.configDir))
+      const resolved = resolveSource(spec, this.options.configDir, this.options.cacheDir, auth)
       if (resolved.error || !resolved.dir) throw new Error(`source '${target}' did not resolve: ${resolved.error ?? 'no directory'}`)
       const file = this.configFilePath()
       if (file === undefined) throw new Error('the host has no config file to persist the new source to')

@@ -286,3 +286,80 @@ workbench credentials explain deploy-token  # per-provider trace: answered / mis
 must name the endpoint and the reference, never the value (section 4). Keep real
 tokens in the provider's own configuration as `${env:VAR}` / `${secret:NAME}`
 references; never commit them.
+
+## Private plugin sources: source auth + the BOOTSTRAP credential set
+
+`kind: git` sources may declare `auth`: a credential REFERENCE (a name), never a
+value. The value is resolved by the **bootstrap credential set** and is used
+TRANSIENTLY for that one fetch.
+
+### Why a bootstrap set (source fetch happens BEFORE plugin discovery)
+
+`createKernel` resolves sources (and their auth) BEFORE it discovers any plugin
+(`src/kernel.ts`: the source walk runs first, and the credentials-provider plugins
+are only found in that same walk). A credential needed to FETCH a source therefore
+cannot come from a plugin-provided provider: that provider is itself discovered in
+a source. `src/credentials/providers/bootstrap.ts` closes the gap by instantiating the CORE
+provider modules (`env`, `file`, `project-env`, `user-env`) DIRECTLY, with no
+cordis context and no plugin, from the same `plugins.<provider>` config sections.
+It speaks the very same `CredentialConsumer` contract (`resolve`/`explain`/`list`)
+that `ctx.credentials` implements, so a consumer never knows which of the two it
+talks to.
+
+Layering (both halves are the same Definition; only availability differs):
+
+| Layer | Made of | Available | Used by |
+| --- | --- | --- | --- |
+| bootstrap set | CORE providers only, no plugins, no cordis | before any plugin is loaded | `git` source auth (fetch), the loader/host |
+| `ctx.credentials` | core + plugin-provided providers, selected by `credentials.providers` | after plugins load | config `${cred:NAME}` / `${secret:NAME}` expansion, plugins |
+
+Selection is configuration: `credentials.bootstrap` lists the core provider ids in
+precedence order (default: all four, in declaration order). Only CORE ids are
+accepted - an unknown id (including a plugin provider id, which cannot exist yet)
+is a loud config error, never a silent fallback. When the bootstrap set yields
+nothing, the source is reported as a per-source error and the loader SKIPS it: the
+other sources still load, and no anonymous fetch is attempted.
+
+### git source auth
+
+```yml
+sources:
+  - kind: git
+    id: workbench-plugins-private
+    url: https://github.com/nexuslbs/workbench-plugins-private
+    ref: main                      # branch, tag or sha (unchanged semantics)
+    subdir: plugins                # optional, unchanged
+    auth:
+      type: github-app             # or `token` (default)
+      credential: GITHUB_APP_KEY   # a NAME, resolved by the bootstrap set
+      appId: 3967918               # github-app: the App id (not a secret)
+      installationId: 138119822    # github-app: the installation (not a secret)
+      # apiBase: https://api.github.com   # GitHub Enterprise
+      # username: x-access-token         # token: basic-auth user
+```
+
+- `type: token` (default): the credential VALUE is the token; it is sent as
+  `-c http.extraheader=Authorization: Basic base64(username:token)`.
+- `type: github-app`: the value is a GitHub App PRIVATE KEY (PEM). A short-lived
+  installation access token is minted through the documented REST flow: an RS256
+  JWT (`iat` = now-60s, `exp` = now+9min, `iss` = app id) is sent as
+  `Authorization: Bearer <jwt>` to `POST {apiBase}/app/installations/{installationId}/access_token`
+  (`Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`),
+  which answers `{ "token": "ghs_...", "expires_at": "<ISO>" }`. Installation
+  tokens expire after ~1h; the minted token is cached IN MEMORY with a 5 minute
+  safety skew, so a long-running `serve` re-mints on its next source resolution
+  instead of failing on an expired token. The JWT is never stored.
+- Secret hygiene: the credential is never written into the checkout. git gets
+  `-c credential.helper=` (so no configured helper can persist or replay
+  anything) plus the transient `http.extraheader`; `origin` keeps the plain
+  configured url, no credential file is created, and every error/log path passes
+  the git arguments through `redactArgs` (the header value becomes `<redacted>`).
+- Failure: a missing/wrong credential produces
+  `source '<id>' (git <url> @ <ref>): authentication failed: ...` and that source
+  is skipped; a source that declares `auth` is NEVER fetched anonymously, and a
+  stale checkout is never served in its place.
+
+NEVER version a key. The key material is operator-provided at runtime: an exported
+env var (`export GITHUB_APP_KEY=...`, resolved by the `env` provider), a
+`credentials.json` next to the config file (the `file` provider), or a mounted
+secret file - and the config references it BY NAME only.

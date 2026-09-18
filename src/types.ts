@@ -109,6 +109,34 @@ export interface LoadedPlugin {
   external: boolean
 }
 
+/**
+ * Authentication for a `git` source. The config carries a credential REFERENCE
+ * (a name), never a value: the value is resolved at FETCH time by the BOOTSTRAP
+ * credential set (`src/credentials/providers/bootstrap.ts`), which is available BEFORE any
+ * plugin is loaded, and is used TRANSIENTLY - it is never written into the
+ * checkout, the remote url or a log.
+ */
+export interface SourceAuthSpec {
+  /**
+   * Credential TYPE this reference resolves to:
+   * - `token` (default): the credential value IS the token,
+   * - `github-app`: the value is a GitHub App PRIVATE KEY (PEM); a short-lived
+   *   installation access token is minted for `installationId` on every fetch,
+   *   so the operator keeps ONE key and no long-lived token anywhere.
+   */
+  type?: 'token' | 'github-app'
+  /** Credential reference BY NAME (`NAME` or `SCOPE/NAME`). Never a value. */
+  credential: string
+  /** `token`: username used in the basic auth header (default `x-access-token`). */
+  username?: string
+  /** `github-app`: the App id the key belongs to (not a secret). */
+  appId?: number | string
+  /** `github-app`: the installation the token is minted for (not a secret). */
+  installationId?: number | string
+  /** `github-app`: API base, default `https://api.github.com` (GitHub Enterprise). */
+  apiBase?: string
+}
+
 /** A plugin source (where the core discovers plugin directories). */
 export interface SourceSpec {
   /** `path` = local directory; `git` = git coordinate. */
@@ -125,6 +153,11 @@ export interface SourceSpec {
   subdir?: string
   /** Core sources set `external: false`; everything else is external (default true). */
   external?: boolean
+  /**
+   * `git` sources: authentication for a PRIVATE remote (a credential REFERENCE,
+   * never a value). Omitted = anonymous fetch, exactly as before.
+   */
+  auth?: SourceAuthSpec
 }
 
 /**
@@ -142,6 +175,16 @@ export interface CredentialsConfig {
   providers?: string[]
   /** Default scope for `${cred:NAME}` references that do not carry one. */
   scope?: string
+  /**
+   * BOOTSTRAP provider ids, in precedence order: the providers usable BEFORE
+   * any plugin is loaded. A `git` source is fetched before plugin discovery, so
+   * a credential needed to FETCH a source cannot come from a plugin-provided
+   * provider (that provider is itself discovered in a source). Only CORE
+   * provider ids (`env`, `file`, `project-env`, `user-env`) can be listed here;
+   * the kernel raises a clear error for anything else. Default: every core
+   * provider, in declaration order.
+   */
+  bootstrap?: string[]
 }
 
 /** A plugin the loader could not load: reported, never fatal. */

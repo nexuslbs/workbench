@@ -4,8 +4,10 @@ import { expandCredentialRefsDeep, findDefaultConfigFile, readConfig } from './c
 import { readRawConfig, updateConfigFile } from './configfile.ts'
 import { Credentials, CREDENTIALS, CREDENTIALS_VERSION, type CredentialRef, type CredentialsService } from './credentials/definition.ts'
 import { CORE_PROVIDERS, registerCoreProviders } from './credentials/providers/index.ts'
+import { bootstrapCredentials } from './credentials/providers/bootstrap.ts'
 import { Host } from './host.ts'
 import { loadPlugins, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
+import { resolveSourceAuths } from './source-auth.ts'
 import { CommandRegistry } from './registry.ts'
 import { WEB, DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, Web, type WebHandler } from './web/definition.ts'
 import { createWebServer, type WebServer } from './web/providers/http.ts'
@@ -149,6 +151,18 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const expansionOptions = config.credentials?.scope === undefined ? {} : { scope: config.credentials.scope }
   const resolver = { resolve: (ref: CredentialRef) => credentials.resolve(ref), enabled: () => credentials.enabled() }
 
+  // BOOTSTRAP credential set: the providers usable BEFORE any plugin is loaded.
+  // A `git` source is fetched before plugin discovery, so a source credential
+  // cannot come from a plugin-provided credentials provider (that provider is
+  // itself discovered in a source). Same definition, no cordis, no plugin.
+  const bootstrapFor = (raw: WorkbenchConfig) =>
+    bootstrapCredentials({ configDir, providers: raw.credentials?.bootstrap, plugins: raw.plugins ?? {} })
+  const sourceAuthResolver = (raw: WorkbenchConfig) =>
+    resolveSourceAuths(raw, { configDir, credentials: bootstrapFor(raw) })
+  // Resolved BEFORE the host exists and before the first source walk: this is
+  // what makes a private source fetchable with no plugin loaded.
+  const sourceAuth = await sourceAuthResolver(config)
+
   // The HOST: the live plugin set and the single mutation path. It exists before
   // the plugins load so `ctx.workbench.host()` / `.inventory()` already work
   // while a plugin is being applied.
@@ -160,6 +174,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     cacheDir: cacheDir.length > 0 ? cacheDir : path.join(configDir, '.workbench', 'sources'),
     includeExternal: options.includeExternal !== false,
     config,
+    sourceAuth,
+    sourceAuthResolver,
     declare: (discovery: PluginDiscovery): void => {
       for (const capability of discovery.capabilities) {
         if (capability.id !== CREDENTIALS || capability.provider === undefined) continue
@@ -215,6 +231,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     configDir,
     cacheDir: host.options.cacheDir,
     includeExternal: options.includeExternal !== false,
+    sourceAuth,
     log,
   }
 

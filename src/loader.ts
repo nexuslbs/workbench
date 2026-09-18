@@ -3,7 +3,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Context, Fiber } from 'cordis'
 import { markApplying } from './attribution.ts'
-import { resolveSource, type ResolvedSource } from './sources.ts'
+import { resolveSource, sourceId, type ResolvedSource, type SourceAuthOutcome } from './sources.ts'
 import {
   MANIFEST_FILE,
   normalizeCapabilities,
@@ -62,6 +62,13 @@ export interface LoadOptions {
   declare?: (discovery: PluginDiscovery) => void
   /** Loads only the discovered plugins this predicate accepts (two-phase loading). */
   filter?: (discovery: PluginDiscovery) => boolean
+  /**
+   * Source AUTH resolved BEFORE the walk, keyed by source id: a `git` source that
+   * declares `auth` cannot be fetched without it (the caller resolves it through
+   * the BOOTSTRAP credential set, `src/credentials/providers/bootstrap.ts`, which exists
+   * without any plugin). Omitted = anonymous fetch, exactly as before.
+   */
+  sourceAuth?: ReadonlyMap<string, SourceAuthOutcome>
 }
 
 /** A discovered plugin: its manifest and where it came from, before import. */

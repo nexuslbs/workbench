@@ -24,7 +24,26 @@ export {
   type CredentialExpansionOptions,
 } from './config.ts'
 export { readRawConfig, updateConfigFile, renderConfigPath } from './configfile.ts'
-export { resolveSource } from './sources.ts'
+export { resolveSource, sourceId, redactArgs, type ResolvedSource, type SourceAuthOutcome } from './sources.ts'
+export {
+  resolveSourceAuth,
+  resolveSourceAuths,
+  githubAppJwt,
+  githubAppInstallationToken,
+  gitAuthArgs,
+  clearInstallationTokenCache,
+  DEFAULT_API_BASE,
+  TOKEN_SKEW_MS,
+  type SourceAuthOptions,
+  type GitHubAppTokenOptions,
+} from './source-auth.ts'
+export {
+  bootstrapCredentials,
+  bootstrapProviders,
+  coreProviderIds,
+  BootstrapCredentials,
+  type BootstrapOptions,
+} from './credentials/providers/bootstrap.ts'
 // The credentials SERVICE DEFINITION (the contract, no provider vocabulary) and
 // the core PROVIDERS that ship with the core. An external provider implements
 // the definition; a consumer uses the definition. Neither may import the other:
