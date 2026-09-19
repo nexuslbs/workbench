@@ -24,11 +24,42 @@
 # toolchain is needed.
 FROM node:22-bookworm-slim
 
-# git: plugin sources of kind `git` are cloned into WORKBENCH_CACHE_DIR at boot.
-# ca-certificates: HTTPS fetches. curl: the HEALTHCHECK below.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates curl \
- && rm -rf /var/lib/apt/lists/*
+# Client tools the plugins need for their external transports (behind the
+# scenes) - BUILD-time only, a container start installs nothing and the image
+# stays runnable offline:
+#   git             - plugin sources of kind `git` (cloned at boot) and HTTPS
+#   ca-certificates - HTTPS fetches
+#   curl            - the HEALTHCHECK below
+#   openssh-client  - the `ssh` / `ssh+container` transports
+#   docker-ce-cli + - the `container` transport: `docker compose -p <project>
+#   docker-compose-   --env-file <env> -f <file> exec -T <service> sh -c '<args>'
+#   plugin            into a sibling service of a deployment stack (himalaya
+#                     lives only in the omni `toolbox` image). CLIENT ONLY: no
+#                     daemon, no docker-in-docker, no privileged mode - the
+#                     deployment mounts the host socket (docker.sock) so this
+#                     client reaches the HOST daemon.
+#
+# Versions: the Docker apt repo CHANNEL is pinned ("stable" for this image's own
+# Debian codename, bookworm on node:22-bookworm-slim), not an exact apt version:
+# the repo prunes old builds, so an exact pin turns a rebuild into a failure.
+# The resolved versions are printed below at build time and recorded in the
+# deploy README. Alternative route (not used): the published STATIC client
+# binaries (download.docker.com/linux/static/stable) - no apt repo and no key,
+# but the compose v2 plugin comes from its own GitHub release and must be kept
+# in sync by hand.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends git ca-certificates curl openssh-client; \
+    install -m 0755 -d /etc/apt/keyrings; \
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; \
+    chmod a+r /etc/apt/keyrings/docker.asc; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin; \
+    docker --version; \
+    docker compose version; \
+    ssh -V; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workbench
 
