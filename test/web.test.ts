@@ -150,7 +150,7 @@ test('the core provider serves the shell, the page index, assets and routes over
 
 test('the kernel serves the empty shell when no UI plugin is configured', async () => {
   const kernel = await createKernel({
-    config: { sources: [{ kind: 'path', id: 'core', path: CORE_PLUGINS, external: false }] },
+    config: { sources: [{ kind: 'path', id: 'core', path: CORE_PLUGINS, external: false }], plugins: { 'hello-world': {} } },
     configDir: path.dirname(CORE_PLUGINS),
     log: () => {},
   })

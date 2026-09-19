@@ -282,21 +282,35 @@ one directory with a `workbench.plugin.json` manifest and an ESM entry module
 whose default export is a cordis plugin; the plugin registers its capabilities
 through the injected `ctx.workbench` service (and only through it).
 
-**Discovery is install + load.** A plugin directory inside a scanned source is
-installed AND loaded in the SAME pass: there is no roster and no per-plugin
-registration code. The config `plugins{}` section is per-plugin CONFIG (it tunes
-and it can disable), never a list of what is enabled - a plugin with no config
-entry is applied with `{}`. `apply()` therefore must not require optional config:
-a plugin that needs config reports a "not configured" state gracefully and fails
-only when its capability is actually used. "Not configured" is not an error and
-never appears in the load failures, while an `apply()` throw always does.
-`plugins.<name>.disabled: true` is the explicit opt-out of a discovered plugin:
+**`sources:` DISCOVERS, `plugins:` LOADS (INTENTIONAL BREAKING CHANGE).** A
+plugin directory inside a scanned source is DISCOVERED: it is part of the
+"available plugins" inventory (`workbench plugins`, the Plugin Inventory page)
+but it is LOADED only when the config NAMES it under `plugins:`. Naming it is
+therefore how it is enabled, and the row is also its config - it is passed to
+`apply(ctx, config)`, `{}` when the row has no fields, so `apply()` must not
+require optional config. A discovered plugin with NO row is reported as
+`available`: installable in one click (`enable` persists its row) and never
+imported. `plugins.<name>.disabled: true` is the PARK: configured, deliberately
+off, listed under `disabled` and never under `failures`. A config written for the
+old scan-and-load semantics must now list every plugin it wants loaded.
 
 ```yaml
-plugins:
+sources:                      # where plugins are DISCOVERED (available)
+  - kind: path
+    id: workbench-plugins
+    path: ../workbench-plugins/plugins
+
+plugins:                      # the ROSTER: what is LOADED, plus its config
+  plugin-inventory: {}        # named -> loaded
+  plugin-manager: {}          #       (an empty row is a valid config)
   credentials-stub:
-    disabled: true   # not imported; listed under `disabled`, not under `failures`
+    disabled: true            # parked: not imported, listed under `disabled`
+# ANY other discovered plugin is `available` - listed, not loaded
 ```
+
+A plugin that needs config reports a "not configured" state gracefully and fails
+only when its capability is actually used: "not configured" is not an error and
+never appears in the load failures, while an `apply()` throw always does.
 
 Product plugins live in `nexuslbs/workbench-plugins`. The core repo only hosts
 the core test plugin `hello-world`, and it is loaded through exactly the same

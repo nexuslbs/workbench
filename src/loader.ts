@@ -38,6 +38,11 @@ export interface LoadReport {
   /** Names of discovered plugins the config disables (`plugins.<name>.disabled`). */
   disabled: string[]
   /**
+   * Names of discovered plugins the config does NOT name (`plugins.<name>` row
+   * absent): they are AVAILABLE to load, and are never imported.
+   */
+  available: string[]
+  /**
    * The cordis fiber of every LOADED plugin, keyed by plugin name. Kept out of
    * {@link LoadedPlugin} on purpose: a fiber is a live object and must never end
    * up in JSON output.
@@ -137,6 +142,20 @@ function normalizeExport(exported: unknown, manifest: PluginManifest, file: stri
 /** True when the config disables a plugin (`plugins.<name>.disabled: true`). */
 export function isDisabled(config: WorkbenchConfig, name: string): boolean {
   return config.plugins?.[name]?.disabled === true
+}
+
+/**
+ * True when the config NAMES the plugin in the ROSTER: the `plugins:` section is
+ * the enable list, so only a plugin with a `plugins.<name>` row (own property) is
+ * imported. A discovered plugin WITHOUT a row is AVAILABLE - listed by the
+ * inventory, installable in one click (`enable`), never loaded.
+ *
+ * The row is also the plugin's config (`apply(ctx, config)` receives it, `{}`
+ * when empty); `disabled: true` inside it is the explicit PARK (the row is on
+ * the roster, the plugin is not loaded - see {@link isDisabled}).
+ */
+export function isRosterMember(config: WorkbenchConfig, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(config.plugins ?? {}, name)
 }
 
 /**
@@ -245,10 +264,19 @@ export async function loadDiscovered(
 }
 
 /**
- * Discovers, imports and loads every plugin of every configured source into the
- * given cordis context. A failing plugin is reported, never fatal. A plugin the
- * config disables (`plugins.<name>.disabled: true`) is reported as disabled and
- * is NOT imported.
+ * Discovers the configured sources, then imports and loads ONLY the plugins the
+ * config NAMES in its roster (`plugins.<name>`; R1): `sources:` says what is
+ * AVAILABLE, `plugins:` says what is LOADED plus its config. A discovered plugin
+ * the config does not name is reported as available and is NOT imported; a named
+ * plugin with `disabled: true` is reported as disabled and is NOT imported
+ * either. A failing plugin is reported, never fatal.
+ *
+ * The selection (roster + park flag) is applied HERE, so it is identical on the
+ * boot path and on every host-driven load: the host reuses this predicate
+ * through {@link isRosterMember} and {@link isDisabled}.
+ *
+ * A plugin name discovered in MORE THAN ONE source is a reported failure for the
+ * later occurrence: the FIRST source in `sources:` order wins, deterministically.
  */
 export async function loadPlugins(ctx: Context, options: LoadOptions): Promise<LoadReport> {
   const found = discoverPlugins(options)
@@ -258,17 +286,34 @@ export async function loadPlugins(ctx: Context, options: LoadOptions): Promise<L
     sources: found.sources,
     discoveries: found.discoveries,
     disabled: [],
+    available: [],
     fibers: new Map<string, Fiber>(),
   }
   const counts = new Map<string, number>()
+  const seen = new Map<string, PluginDiscovery>()
 
   for (const discovery of found.discoveries) {
+    const first = seen.get(discovery.name)
+    if (first !== undefined) {
+      const error = `duplicate plugin name: already discovered in source '${first.source}' (${first.dir}); the first source in 'sources:' order wins`
+      report.failures.push({ plugin: discovery.name, source: discovery.source, error })
+      options.log(`plugin ${discovery.name} from ${discovery.source} skipped: ${error}`)
+      continue
+    }
+    seen.set(discovery.name, discovery)
     if (options.filter && !options.filter(discovery)) continue
+    // THE ROSTER: only a plugin named under `plugins:` is loaded. Everything
+    // else stays available (discovered, installable, not imported).
+    if (!isRosterMember(options.config, discovery.name)) {
+      report.available.push(discovery.name)
+      options.log(`plugin ${discovery.name} is available (not named in the 'plugins:' roster), not loaded`)
+      continue
+    }
     options.declare?.(discovery)
     const pluginConfig = { ...(options.config.plugins?.[discovery.name] ?? {}) }
     if (pluginConfig.disabled === true) {
       report.disabled.push(discovery.name)
-      options.log(`plugin ${discovery.name} is disabled in the config, not loaded`)
+      options.log(`plugin ${discovery.name} is parked in the config (plugins.${discovery.name}.disabled: true), not loaded`)
       continue
     }
     delete pluginConfig.disabled

@@ -22,7 +22,7 @@ import path from 'node:path'
 import type { Context, Fiber } from 'cordis'
 import { readConfig } from './config.ts'
 import { readRawConfig, updateConfigFile } from './configfile.ts'
-import { discoverPlugins, loadDiscovered, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
+import { discoverPlugins, isDisabled, isRosterMember, loadDiscovered, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { resolveSource, sourceId, type SourceAuthOutcome } from './sources.ts'
 import {
   renderCapability,
@@ -139,12 +139,25 @@ export class Host implements HostApi {
     return (this.ctx as unknown as { workbench: RegistryLike }).workbench
   }
 
+  /**
+   * The state of a discovered plugin that is NOT loaded: ROSTER-AWARE. A plugin
+   * the config does not name under `plugins:` is `available` (discovered,
+   * installable with one `enable`, never imported); a named row with
+   * `disabled: true` is `disabled` (parked). The state of a plugin that loaded
+   * or failed is set by the caller, never here.
+   */
+  private restState(name: string): PluginState {
+    const config = this.rawConfig()
+    if (!isRosterMember(config, name)) return 'available'
+    return isDisabled(config, name) ? 'disabled' : 'available'
+  }
+
   /** Takes over the state of a boot performed by the kernel. */
   adopt(state: AdoptedState): void {
     this.current = state.config
     this.sourceReports = state.sources
     for (const discovery of state.discoveries) {
-      this.entries.set(discovery.name, { discovery, state: 'discovered' })
+      this.entries.set(discovery.name, { discovery, state: this.restState(discovery.name) })
     }
     for (const plugin of state.plugins) {
       const entry = this.entries.get(plugin.name)
@@ -173,10 +186,12 @@ export class Host implements HostApi {
   /** The loader inventory: the data every read surface shows. */
   inventory(): HostInventory {
     const commands = this.registry().commands() as CommandInfo[]
+    const config = this.writtenConfig()
     const entries = [...this.entries.values()].sort((a, b) => a.discovery.name.localeCompare(b.discovery.name))
     const plugins: LoadedPlugin[] = []
     const failures: LoadFailure[] = []
     const disabled: string[] = []
+    const available: string[] = []
     const discovered: PluginDiscoveryInfo[] = []
     const loadedPerSource = new Map<string, number>()
     for (const entry of entries) {
@@ -189,6 +204,7 @@ export class Host implements HostApi {
         failures.push({ plugin: discovery.name, source: discovery.source, error: entry.error ?? 'unknown error' })
       }
       if (entry.state === 'disabled') disabled.push(discovery.name)
+      if (entry.state === 'available') available.push(discovery.name)
       discovered.push({
         name: discovery.name,
         version: discovery.version,
@@ -198,6 +214,7 @@ export class Host implements HostApi {
         external: discovery.external,
         capabilities: discovery.capabilities.map(renderCapability),
         state: entry.state,
+        roster: isRosterMember(config, discovery.name),
         ...(entry.error === undefined ? {} : { error: entry.error }),
         commands: commands.filter((command) => command.plugin === discovery.name).map((command) => command.name),
       })
@@ -209,6 +226,7 @@ export class Host implements HostApi {
       sources,
       failures,
       disabled,
+      available,
       discovered,
       commands: commands.map(({ name, description, plugin }) => ({ name, description, plugin })),
     }
@@ -304,7 +322,7 @@ export class Host implements HostApi {
     for (const discovery of found.discoveries) {
       seen.add(discovery.name)
       const entry = this.entries.get(discovery.name)
-      if (entry === undefined) this.entries.set(discovery.name, { discovery, state: 'discovered' })
+      if (entry === undefined) this.entries.set(discovery.name, { discovery, state: this.restState(discovery.name) })
       else entry.discovery = discovery
     }
     for (const [name, entry] of [...this.entries]) {
@@ -376,7 +394,7 @@ export class Host implements HostApi {
         throw new Error(`plugin '${name}' is not loaded (state: ${entry?.state ?? 'unknown'})`)
       }
       await entry.fiber?.dispose()
-      entry.state = 'discovered'
+      entry.state = 'available'
       delete entry.fiber
       delete entry.config
       this.syncRegistry()
@@ -389,7 +407,7 @@ export class Host implements HostApi {
       const entry = this.entries.get(name)
       if (entry?.state === 'loaded') {
         await entry.fiber?.dispose()
-        entry.state = 'discovered'
+        entry.state = 'available'
         delete entry.fiber
         delete entry.config
         this.syncRegistry()
@@ -423,37 +441,72 @@ export class Host implements HostApi {
     })
   }
 
+  /**
+   * Enables a plugin: it PERSISTS the `plugins.<name>` ROSTER ROW (creating an
+   * empty one when the plugin was only available, clearing `disabled: true`
+   * when it was parked) and loads it. The row is what makes the plugin load
+   * again on the next boot - `load` alone loads it for this process only.
+   */
   async enable(name: string): Promise<HostActionResult> {
     return this.perform('enable', name, { name }, async (state) => {
       const discovery = this.discoveryOf(name)
       const file = this.configFilePath()
-      const disabled = this.rawConfig().plugins?.[name]?.disabled === true
-      if (disabled) {
+      const written = this.rawConfig()
+      const onRoster = isRosterMember(written, name)
+      const parked = isDisabled(written, name)
+      const patch: ConfigPatch[] = []
+      if (!onRoster) patch.push({ op: 'set', path: ['plugins', name], value: {} })
+      if (parked) patch.push({ op: 'delete', path: ['plugins', name, 'disabled'] })
+      if (patch.length > 0) {
         if (file === undefined) {
-          throw new Error("plugin is disabled in the config but the host has no config file to persist the change to")
+          throw new Error('the host has no config file to persist the roster row to (inline config)')
         }
-        const patch: ConfigPatch[] = [{ op: 'delete', path: ['plugins', name, 'disabled'] }]
         updateConfigFile(file, patch)
         state.persisted = true
         this.reloadConfig()
       }
       const entry = this.entries.get(name)
-      if (entry?.state === 'loaded') return `plugin '${name}' is already loaded (its 'disabled' flag is cleared)`
-      if (entry !== undefined && entry.state === 'disabled') entry.state = 'discovered'
+      if (entry?.state === 'loaded') {
+        return `plugin '${name}' is already loaded (it is on the 'plugins:' roster${state.persisted ? ', row persisted' : ''})`
+      }
+      if (entry !== undefined) entry.state = 'available'
       const raw = this.rawConfig().plugins?.[name] ?? {}
       const config = await this.pluginConfigFor(name, raw)
       this.declareCapabilities(discovery)
       const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
       this.entries.set(name, { discovery, state: 'loaded', fiber })
       this.syncRegistry()
-      return `enabled plugin '${name}' (config${state.persisted ? ' updated' : ' unchanged'}, plugin loaded)`
+      const what = onRoster
+        ? parked
+          ? "its 'disabled' flag is cleared"
+          : 'it was already on the roster'
+        : `'plugins.${name}' added to the roster`
+      return `enabled plugin '${name}' (${what}, config${state.persisted ? ' updated' : ' unchanged'}, plugin loaded)`
     })
   }
 
+  /**
+   * Disables a plugin: it is unloaded and PARKED with a persisted
+   * `plugins.<name>.disabled: true`. The roster row stays (the plugin is
+   * configured, deliberately off) and the inventory reports it under `disabled`,
+   * never under `failures`. A plugin that is only AVAILABLE (no roster row) is
+   * already not loaded: there is nothing to park, and no row is invented.
+   */
   async disable(name: string): Promise<HostActionResult> {
     return this.perform('disable', name, { name }, async (state) => {
       const entry = this.entries.get(name)
       if (entry === undefined) throw new Error(`plugin '${name}' is not discovered in any configured source`)
+      if (!isRosterMember(this.rawConfig(), name)) {
+        if (entry.state === 'loaded') {
+          await entry.fiber?.dispose()
+          delete entry.fiber
+          delete entry.config
+          entry.state = 'available'
+          this.syncRegistry()
+          return `unloaded plugin '${name}' (not on the 'plugins:' roster, so there is no row to park - it stays available)`
+        }
+        return `plugin '${name}' is available (not on the 'plugins:' roster) and not loaded - nothing to park`
+      }
       if (entry.state === 'loaded') {
         await entry.fiber?.dispose()
         delete entry.fiber
@@ -497,12 +550,21 @@ export class Host implements HostApi {
       this.refresh()
       const added = [...this.entries.values()].filter((entry) => entry.discovery.source === resolved.id)
       let loaded = 0
+      let available = 0
       for (const entry of added) {
         if (entry.state === 'loaded') continue
+        // ROSTER semantics: a newly discovered source makes its plugins
+        // AVAILABLE, it does not load them. Only a plugin the config names in
+        // `plugins:` is loaded (the same predicate as the boot path).
+        if (!isRosterMember(this.rawConfig(), entry.discovery.name)) {
+          entry.state = 'available'
+          available += 1
+          continue
+        }
         try {
           const config = await this.pluginConfigFor(entry.discovery.name, this.rawConfig().plugins?.[entry.discovery.name] ?? {})
-                this.declareCapabilities(entry.discovery)
-      const { fiber } = await loadDiscovered(this.ctx, entry.discovery, config, this.options.log)
+          this.declareCapabilities(entry.discovery)
+          const { fiber } = await loadDiscovered(this.ctx, entry.discovery, config, this.options.log)
           entry.state = 'loaded'
           entry.fiber = fiber
           loaded += 1
@@ -513,7 +575,7 @@ export class Host implements HostApi {
         }
       }
       this.syncRegistry()
-      return `installed source '${resolved.id}' (${resolved.kind}${resolved.dir ? ` ${resolved.dir}` : ''}), ${loaded} of ${added.length} plugin(s) loaded`
+      return `installed source '${resolved.id}' (${resolved.kind}${resolved.dir ? ` ${resolved.dir}` : ''}), ${loaded} of ${added.length} plugin(s) loaded, ${available} available to enable`
     })
   }
 
@@ -532,7 +594,7 @@ export class Host implements HostApi {
         // Forget the entry too: `refresh()` below only prunes entries that are
         // not loaded, so a disposed plugin must leave the loaded state or it
         // would stay in the inventory forever (and keep being served).
-        entry.state = 'discovered'
+        entry.state = 'available'
         delete entry.fiber
         delete entry.config
       }

@@ -62,6 +62,10 @@ test('serve merges the Web UI and /health on one listener when the web port is t
       '    id: core',
       `    path: ${CORE_PLUGINS}`,
       '    external: false',
+      // ROSTER semantics: the config NAMES the plugins to load; a discovered
+      // plugin without a row here is only available.
+      'plugins:',
+      '  hello-world: {}',
       'web:',
       '  enabled: true',
       '  host: 127.0.0.1',

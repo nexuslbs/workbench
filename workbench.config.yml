@@ -26,7 +26,12 @@ sources:
 #    id: workbench-plugins
 #    path: ../workbench-plugins/plugins
 
+# `plugins:` is the ROSTER (the enable list): only the plugins named here are
+# loaded. A plugin discovered in `sources:` with no row here is AVAILABLE - the
+# inventory lists it, the loader never imports it, and one `enable`
+# (workbench plugins->Plugin Inventory page, or the host API) persists its row.
+# `disabled: true` inside a row parks that plugin (configured, deliberately off).
 plugins:
-  # per-plugin config, keyed by plugin name
+  # per-plugin config, keyed by plugin name (the row is also the selection)
   hello-world:
     message: Hello World

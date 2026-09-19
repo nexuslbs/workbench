@@ -47,6 +47,8 @@ test('a provider plugin from a configured source is declared at boot: apply() re
   const kernel = await createKernel({
     config: {
       sources: [{ kind: 'path', id: 'providers', path: path.join(dir, 'providers'), external: true }],
+      // ROSTER semantics: only a plugin NAMED under `plugins:` is loaded.
+      plugins: { 'boot-provider': {} },
       credentials: { providers: ['boot-mock'] },
     },
     configDir: dir,

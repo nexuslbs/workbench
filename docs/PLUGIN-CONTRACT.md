@@ -18,9 +18,10 @@ One plugin = one directory containing a manifest and an entry module:
 ```
 
 A plugin **source** is a directory of such plugin directories. The core scans
-the immediate subdirectories of every configured source and loads each one that
-contains a `workbench.plugin.json` (discovery and loading are the same pass: see
-"Discovery, config and the `disabled` opt-out" below).
+the immediate subdirectories of every configured source and DISCOVERS each one
+that contains a `workbench.plugin.json`; the plugin is LOADED only when the
+config names it under `plugins:` (see "Sources, the ROSTER and the `disabled`
+park" below).
 
 ## 2. Manifest (`workbench.plugin.json`)
 
@@ -105,40 +106,47 @@ Rules:
    answers "not declared". The manifest stays what makes a provider resolvable:
    registering an id no manifest declared is still an error.
 
-### Discovery, config and the `disabled` opt-out
+### Sources, the ROSTER and the `disabled` park
 
-Discovery and loading are the SAME pass: a plugin DIRECTORY inside a scanned
-source is installed AND loaded. There is no roster and no per-plugin
-registration code - dropping the directory into a configured source is the whole
-wiring, and copying a working config into a fresh checkout boots the same
-plugins.
+`sources:` says where plugins are **DISCOVERED**; `plugins:` is the **ROSTER**, the
+list of plugins that are **LOADED**. A plugin DIRECTORY inside a scanned source is
+DISCOVERED - it is part of the "available plugins" inventory - and it is LOADED
+only when the config names it under `plugins:`.
 
-`plugins.<name>` is therefore **per-plugin CONFIG, not a list of enabled
-plugins**:
+- a discovered plugin WITH a `plugins.<name>` row is imported, and the row is
+  passed to `apply(ctx, config)` (a row with no fields is `{}`);
+- a discovered plugin WITHOUT a row is **`available`**: the inventory
+  (`workbench plugins`, the Plugin Inventory page) reports its name, version,
+  source, directory and capabilities, but the loader NEVER imports it. That is
+  the answer to "which plugins can I load?", and `enable` turns one into a
+  loaded plugin by persisting its row;
+- `plugins.<name>.disabled: true` is the **park**: the row stays (the plugin is
+  configured, deliberately off), the plugin is NOT imported and it is reported
+  under `disabled`, never under `failures`. It is a config edit, so it survives a
+  restart, and the plugin manager UI persists exactly this key (enable creates
+  or clears it, disable sets it).
 
-- an entry **configures/tunes** the plugin (it is passed to `apply(ctx, config)`);
-- a MISSING entry is not an error and not a skip - the plugin is still applied,
-  with `{}` as its config, which is why `apply()` must not require optional
-  config (rule 6);
-- `plugins.<name>.disabled: true` is the explicit opt-out: the loader does NOT
-  import that plugin, reports it under `disabled` (never under `failures`) and
-  keeps every other plugin loading. It is a config edit, so it survives a
-  restart, and the plugin manager UI persists exactly this key (enable deletes
-  it, disable sets it).
+The row is the plugin's config AND its selection, so `apply()` is only ever
+called for a plugin the operator asked for - which is why a named plugin can
+still receive `{}` (write `settings: {}`, or an empty `settings:`) and `apply()`
+must not require optional config (rule 6).
 
 ```yaml
 sources:
+  # every plugin DIRECTORY here is DISCOVERED (available)
   - kind: path
     id: workbench-plugins
     path: ../workbench-plugins/plugins
 
 plugins:
-  # configures the plugin (and is the ONLY way it is selected)
+  # ROSTER: loaded here, with this config
   hello-otherworld:
     message: Hello Otherworld
-  # opts a discovered plugin out without removing its directory from the source
+  # PARKS a discovered plugin: configured, deliberately not loaded
   credentials-stub:
     disabled: true
+  # every OTHER discovered plugin has no row -> `available`:
+  # reported by the inventory, never imported, one `enable` persists its row
 ```
 
 The manifest `config` block is **documentation for the operator** (JSON-schema

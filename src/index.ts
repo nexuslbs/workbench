@@ -8,6 +8,7 @@ export {
   loadDiscovered,
   loadPlugins,
   isDisabled,
+  isRosterMember,
   type LoadReport,
   type LoadFailure,
   type LoadOptions,

@@ -23,6 +23,11 @@ sources:
   #   ref: main
   #   subdir: plugins
 
+# `plugins:` is the ROSTER: only the plugins named here are LOADED. A plugin
+# discovered in `sources:` without a row is merely AVAILABLE - listed by
+# `workbench plugins` / the Plugin Inventory page and loadable with one `enable`
+# (which persists the row). A row with `disabled: true` PARKS a plugin
+# (configured, deliberately off).
 plugins:
   # YAML scalars must stay strings here: quote values like "yes", "on", "42",
   # "1.0" and anything starting with a YAML indicator character (* & ! % @ ` etc).

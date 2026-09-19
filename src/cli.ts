@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
 import { CREDENTIALS_CONTRACT, parseCredentialRef, refLabel } from './credentials/definition.ts'
 import { createKernel, type Kernel } from './kernel.ts'
-import type { LoadedPlugin } from './types.ts'
+import type { LoadedPlugin, PluginDiscoveryInfo } from './types.ts'
 import { DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, type WebHandler } from './web/definition.ts'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -161,9 +161,27 @@ function describeSource(source: Kernel['sources'][number]): string {
   return `source ${source.id} (${source.kind}, ${source.external ? 'external' : 'core'}): ${source.dir ?? 'unresolved'} [${source.plugins} plugin(s)]${source.error ? ` error=${source.error}` : ''}`
 }
 
+/**
+ * One discovered plugin, as the INVENTORY reports it: the state is what tells
+ * the operator whether the plugin is loaded, only AVAILABLE (discovered in a
+ * source but not named in the `plugins:` roster), parked (`disabled`) or
+ * failed.
+ */
+function describeDiscovery(entry: PluginDiscoveryInfo): string {
+  const origin = entry.external ? `external:${entry.source}` : entry.source
+  const capabilities = entry.capabilities.length ? entry.capabilities.join(', ') : '-'
+  const error = entry.state === 'failed' && entry.error ? `  ${entry.error}` : ''
+  const hint = entry.state === 'available' ? '  (available: add it to the plugins: roster - or enable it - to load it)' : ''
+  return `${entry.name}@${entry.version}  ${origin}  [${capabilities}]  [${entry.state}]${error}${hint}`
+}
+
 function summaryLine(kernel: Kernel): string {
   const core = kernel.plugins.filter((plugin) => !plugin.external).length
-  return `workbench: ${kernel.plugins.length} plugin(s) loaded (${core} core, ${kernel.plugins.length - core} external)`
+  const inventory = kernel.host.inventory()
+  return (
+    `workbench: ${kernel.plugins.length} plugin(s) loaded (${core} core, ${kernel.plugins.length - core} external), ` +
+    `${inventory.available.length} available (not on the plugins: roster), ${inventory.disabled.length} disabled, ${inventory.failures.length} failed`
+  )
 }
 
 /** Credential VALUES are never printed: every output masks them. */
@@ -412,13 +430,14 @@ async function main(): Promise<void> {
   const kernel = await createKernel({ configFile: resolveConfigFile(flags), includeExternal: flags.includeExternal })
   try {
     if (head === 'plugins') {
+      const inventory = kernel.host.inventory()
       if (flags.json) {
-        process.stdout.write(JSON.stringify({ plugins: kernel.plugins, sources: kernel.sources, configFile: kernel.configFile }, null, 2) + '\n')
+        process.stdout.write(JSON.stringify({ ...inventory, configFile: kernel.configFile }, null, 2) + '\n')
         return
       }
       process.stdout.write(summaryLine(kernel) + '\n')
       for (const source of kernel.sources) process.stdout.write(describeSource(source) + '\n')
-      for (const plugin of kernel.plugins) process.stdout.write(`  ${describePlugin(plugin)}\n`)
+      for (const entry of inventory.discovered) process.stdout.write(`  ${describeDiscovery(entry)}\n`)
       return
     }
 

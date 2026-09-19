@@ -204,8 +204,17 @@ export interface SourceReport {
   error?: string
 }
 
-/** Where a discovered plugin stands in the live host. */
-export type PluginState = 'loaded' | 'failed' | 'disabled' | 'discovered'
+/**
+ * Where a discovered plugin stands in the live host.
+ *
+ * - `loaded`: named in the `plugins:` roster and applied by the loader.
+ * - `available`: discovered in a configured source but NOT on the roster (no
+ *   `plugins.<name>` row) - installable with one `enable`, never imported.
+ * - `disabled`: on the roster but parked (`disabled: true`) - not loaded, and
+ *   deliberately NOT a failure.
+ * - `failed`: named on the roster but the import/`apply()` threw.
+ */
+export type PluginState = 'loaded' | 'failed' | 'disabled' | 'available'
 
 /** One discovered plugin, with its manifest facts and its live state. */
 export interface PluginDiscoveryInfo {
@@ -220,6 +229,8 @@ export interface PluginDiscoveryInfo {
   /** Rendered capabilities (display form). */
   capabilities: string[]
   state: PluginState
+  /** True when the config NAMES the plugin in the `plugins:` roster. */
+  roster: boolean
   /** Load error, when `state` is `failed`. */
   error?: string
   /** Commands the plugin registered (only while loaded). */
@@ -245,9 +256,11 @@ export interface HostInventory {
   plugins: LoadedPlugin[]
   sources: SourceReport[]
   failures: LoadFailure[]
-  /** Names of discovered plugins that are disabled in the config. */
+  /** Names of discovered plugins that are disabled in the config (parked). */
   disabled: string[]
-  /** Every discovered plugin with its state (loaded, failed, disabled, discovered). */
+  /** Names of discovered plugins that are NOT on the roster (`plugins:`). */
+  available: string[]
+  /** Every discovered plugin with its state (loaded, failed, disabled, available). */
   discovered: PluginDiscoveryInfo[]
   commands: CommandInfo[]
 }
@@ -331,8 +344,14 @@ export interface ConfigApi {
 
 /** The workbench config file (`workbench.config.json`). */
 export interface WorkbenchConfig {
+  /** Where plugins are DISCOVERED: the available-plugins inventory. */
   sources: SourceSpec[]
-  /** Per plugin config, keyed by plugin name. */
+  /**
+   * The plugin ROSTER: only the plugins NAMED here are loaded (plus per-plugin
+   * config, which is passed to `apply(ctx, config)` as-is; `{}` when the row is
+   * empty). A discovered plugin without a row here is AVAILABLE, not loaded.
+   * `disabled: true` inside a row parks it (roster row present, not loaded).
+   */
   plugins?: Record<string, PluginConfig>
   /** Credentials provider selection/precedence (see {@link CredentialsConfig}). */
   credentials?: CredentialsConfig
@@ -354,9 +373,13 @@ export interface WebConfig {
   port?: number
 }
 
-/** Per-plugin config, keyed by plugin name; `disabled` is the loader's own key. */
+/**
+ * One row of the `plugins:` ROSTER (keyed by plugin name): a row's PRESENCE is
+ * what makes the plugin load, its content is the plugin's config, and
+ * `disabled: true` is the loader's own park flag (row present, not loaded).
+ */
 export interface PluginConfig {
-  /** True when the loader must skip this plugin (enable/disable is configuration). */
+  /** True when the loader must PARK this plugin (roster row present, not loaded). */
   disabled?: boolean
   [key: string]: unknown
 }
