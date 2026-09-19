@@ -166,6 +166,24 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // The HOST: the live plugin set and the single mutation path. It exists before
   // the plugins load so `ctx.workbench.host()` / `.inventory()` already work
   // while a plugin is being applied.
+  // Manifest capability declarations reach the credentials service through this
+  // ONE callback. It must be handed to BOTH the host (a UI-driven load) and the
+  // boot-time load below: the loader calls it right before a plugin is applied,
+  // and without it a plugin that provides a capability would register in an
+  // UNDECLARED state and fail its own apply (docs/PLUGIN-CONTRACT.md, rule 6).
+  const declarePluginCapabilities = (discovery: PluginDiscovery): void => {
+    for (const capability of discovery.capabilities) {
+      if (capability.id !== CREDENTIALS || capability.provider === undefined) continue
+      credentials.declare({
+        provider: capability.provider,
+        version: capability.version ?? CREDENTIALS_VERSION,
+        plugin: discovery.name,
+        source: discovery.source,
+        external: discovery.external,
+      })
+    }
+  }
+
   const host = new Host({
     ctx,
     log,
@@ -176,18 +194,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     config,
     sourceAuth,
     sourceAuthResolver,
-    declare: (discovery: PluginDiscovery): void => {
-      for (const capability of discovery.capabilities) {
-        if (capability.id !== CREDENTIALS || capability.provider === undefined) continue
-        credentials.declare({
-          provider: capability.provider,
-          version: capability.version ?? CREDENTIALS_VERSION,
-          plugin: discovery.name,
-          source: discovery.source,
-          external: discovery.external,
-        })
-      }
-    },
+    declare: declarePluginCapabilities,
     pluginConfig: async (name, raw) => {
       const expanded = (await expandCredentialRefsDeep(raw, resolver, expansionOptions)) as Record<string, unknown>
       void name
@@ -233,6 +240,9 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     includeExternal: options.includeExternal !== false,
     sourceAuth,
     log,
+    // Same declaration step as the host: a plugin that declares a capability in
+    // its manifest is declared BEFORE it is applied, on every load path.
+    declare: declarePluginCapabilities,
   }
 
   // Phase 1: the plugins that PROVIDE the capability (core modules are already

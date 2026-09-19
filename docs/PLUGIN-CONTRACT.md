@@ -19,7 +19,8 @@ One plugin = one directory containing a manifest and an entry module:
 
 A plugin **source** is a directory of such plugin directories. The core scans
 the immediate subdirectories of every configured source and loads each one that
-contains a `workbench.plugin.json`.
+contains a `workbench.plugin.json` (discovery and loading are the same pass: see
+"Discovery, config and the `disabled` opt-out" below).
 
 ## 2. Manifest (`workbench.plugin.json`)
 
@@ -88,6 +89,71 @@ Rules:
    tree. Plugins are self-contained and must not depend on another repository's
    runtime (an external plugin must not import the core package - the context
    service is the whole interface).
+6. **`apply()` must not require optional config.** Every discovered plugin is
+   applied - with `{}` when the config has no `plugins.<name>` row (see below) -
+   so a plugin whose capability needs configuration must stay LOADABLE without
+   it: report a "not configured" state gracefully and fail only when the
+   capability is actually used. An `apply()` that THROWS is a load failure (it is
+   listed under `failures`); "not configured" is not an error and must never be
+   reported as one.
+7. **A manifest capability is DECLARED before the plugin is applied.** When a
+   manifest declares a structured capability (`capabilities: [{ "id":
+   "credentials", "version": 1, "provider": "stub-vault" }]`), the core declares
+   it to that capability's service right before `apply()` runs - on the boot
+   path and on every host-driven load (`load` / `reload` / `retry` / `enable`) -
+   so `apply()` can register what its manifest announced and `register()` never
+   answers "not declared". The manifest stays what makes a provider resolvable:
+   registering an id no manifest declared is still an error.
+
+### Discovery, config and the `disabled` opt-out
+
+Discovery and loading are the SAME pass: a plugin DIRECTORY inside a scanned
+source is installed AND loaded. There is no roster and no per-plugin
+registration code - dropping the directory into a configured source is the whole
+wiring, and copying a working config into a fresh checkout boots the same
+plugins.
+
+`plugins.<name>` is therefore **per-plugin CONFIG, not a list of enabled
+plugins**:
+
+- an entry **configures/tunes** the plugin (it is passed to `apply(ctx, config)`);
+- a MISSING entry is not an error and not a skip - the plugin is still applied,
+  with `{}` as its config, which is why `apply()` must not require optional
+  config (rule 6);
+- `plugins.<name>.disabled: true` is the explicit opt-out: the loader does NOT
+  import that plugin, reports it under `disabled` (never under `failures`) and
+  keeps every other plugin loading. It is a config edit, so it survives a
+  restart, and the plugin manager UI persists exactly this key (enable deletes
+  it, disable sets it).
+
+```yaml
+sources:
+  - kind: path
+    id: workbench-plugins
+    path: ../workbench-plugins/plugins
+
+plugins:
+  # configures the plugin (and is the ONLY way it is selected)
+  hello-otherworld:
+    message: Hello Otherworld
+  # opts a discovered plugin out without removing its directory from the source
+  credentials-stub:
+    disabled: true
+```
+
+The manifest `config` block is **documentation for the operator** (JSON-schema
+ish, shown by the UI): the core never validates it, so it can never produce a
+load error by itself. What the core does with a `plugins.<name>` value is pass
+it to `apply()` and read `disabled` out of it.
+
+A plugin that reports a not-configured state must stay OUT of the failures list:
+only a real load error (an import or `apply()` throw, a missing manifest field or
+entry module) is a failure. A credentials provider that is not configured is the
+reference example: it is still DECLARED by its manifest (so
+`ctx.credentials.providers()` lists it) but it registers NO provider
+(`registered: false`) and announces the missing config through its plugin log;
+`stub-vault` in `nexuslbs/workbench-plugins` `plugins/credentials-stub` works
+exactly like that.
 
 ## 4. Core service (`ctx.workbench`)
 

@@ -201,8 +201,11 @@ entry there):
   - `id` - stable source id used in reports (defaults to the directory/repo name).
   - `external: false` - marks a core source; everything else counts as external
     (and is skipped by `--no-external`).
-- `plugins{}` - per-plugin config, keyed by plugin name, passed to the plugin's
-  `apply(ctx, config)`.
+- `plugins{}` - per-plugin CONFIG, keyed by plugin name, passed to the plugin's
+  `apply(ctx, config)`. It is NOT a list of enabled plugins: a discovered plugin
+  with no entry here is still loaded (its `apply()` receives `{}`), and
+  `plugins.<name>.disabled: true` is the explicit opt-out (the plugin is not
+  imported and is reported under `disabled`, never under the load failures).
 - String values may reference the environment (`${env:VAR}`); they are expanded
   when the config is read, and missing variables are a hard error. Secrets are
   referenced by name only - never inline them in this file.
@@ -278,6 +281,22 @@ Read [`docs/PLUGIN-CONTRACT.md`](docs/PLUGIN-CONTRACT.md). In short: one plugin 
 one directory with a `workbench.plugin.json` manifest and an ESM entry module
 whose default export is a cordis plugin; the plugin registers its capabilities
 through the injected `ctx.workbench` service (and only through it).
+
+**Discovery is install + load.** A plugin directory inside a scanned source is
+installed AND loaded in the SAME pass: there is no roster and no per-plugin
+registration code. The config `plugins{}` section is per-plugin CONFIG (it tunes
+and it can disable), never a list of what is enabled - a plugin with no config
+entry is applied with `{}`. `apply()` therefore must not require optional config:
+a plugin that needs config reports a "not configured" state gracefully and fails
+only when its capability is actually used. "Not configured" is not an error and
+never appears in the load failures, while an `apply()` throw always does.
+`plugins.<name>.disabled: true` is the explicit opt-out of a discovered plugin:
+
+```yaml
+plugins:
+  credentials-stub:
+    disabled: true   # not imported; listed under `disabled`, not under `failures`
+```
 
 Product plugins live in `nexuslbs/workbench-plugins`. The core repo only hosts
 the core test plugin `hello-world`, and it is loaded through exactly the same

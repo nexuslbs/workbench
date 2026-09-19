@@ -341,6 +341,16 @@ export class Host implements HostApi {
 
   // -------------------------------------------------------------- action impl
 
+  /**
+   * Declares a plugin's manifest capabilities right before it is loaded - the
+   * same step the boot performs (see `kernel.ts`). A provider may only register
+   * a provider its manifest DECLARED, so a UI-driven load (load / reload /
+   * retry / enable) must declare it too, or `apply()` fails.
+   */
+  private declareCapabilities(discovery: PluginDiscovery): void {
+    this.options.declare?.(discovery)
+  }
+
   async load(name: string): Promise<HostActionResult> {
     return this.perform('load', name, { name }, async () => {
       const entry = this.entries.get(name)
@@ -351,6 +361,7 @@ export class Host implements HostApi {
         this.options.log(`host: plugin '${name}' is disabled in the config, loading it anyway (explicit request)`)
       }
       const config = await this.pluginConfigFor(name, raw)
+      this.declareCapabilities(discovery)
       const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
       this.entries.set(name, { discovery, state: 'loaded', fiber })
       this.syncRegistry()
@@ -386,6 +397,7 @@ export class Host implements HostApi {
       const discovery = this.discoveryOf(name)
       const raw = this.rawConfig().plugins?.[name] ?? {}
       const config = await this.pluginConfigFor(name, raw)
+      this.declareCapabilities(discovery)
       const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
       this.entries.set(name, { discovery, state: 'loaded', fiber })
       this.syncRegistry()
@@ -403,6 +415,7 @@ export class Host implements HostApi {
       const discovery = this.discoveryOf(name)
       const raw = this.rawConfig().plugins?.[name] ?? {}
       const config = await this.pluginConfigFor(name, raw)
+      this.declareCapabilities(discovery)
       const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
       this.entries.set(name, { discovery, state: 'loaded', fiber })
       this.syncRegistry()
@@ -429,6 +442,7 @@ export class Host implements HostApi {
       if (entry !== undefined && entry.state === 'disabled') entry.state = 'discovered'
       const raw = this.rawConfig().plugins?.[name] ?? {}
       const config = await this.pluginConfigFor(name, raw)
+      this.declareCapabilities(discovery)
       const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
       this.entries.set(name, { discovery, state: 'loaded', fiber })
       this.syncRegistry()
@@ -487,7 +501,8 @@ export class Host implements HostApi {
         if (entry.state === 'loaded') continue
         try {
           const config = await this.pluginConfigFor(entry.discovery.name, this.rawConfig().plugins?.[entry.discovery.name] ?? {})
-          const { fiber } = await loadDiscovered(this.ctx, entry.discovery, config, this.options.log)
+                this.declareCapabilities(entry.discovery)
+      const { fiber } = await loadDiscovered(this.ctx, entry.discovery, config, this.options.log)
           entry.state = 'loaded'
           entry.fiber = fiber
           loaded += 1
