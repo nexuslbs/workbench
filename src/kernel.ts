@@ -6,6 +6,7 @@ import { Credentials, CREDENTIALS, CREDENTIALS_VERSION, type CredentialRef, type
 import { CORE_PROVIDERS, registerCoreProviders } from './credentials/providers/index.ts'
 import { bootstrapCredentials } from './credentials/providers/bootstrap.ts'
 import { EMAIL, EMAIL_VERSION, Email, type EmailService } from './email/definition.ts'
+import { TOTP, TOTP_VERSION, Totp, type TotpService } from './totp/definition.ts'
 import { Host } from './host.ts'
 import { loadPlugins, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { resolveSourceAuths } from './source-auth.ts'
@@ -67,6 +68,12 @@ export interface Kernel {
    */
   email: EmailService
   /**
+   * The TOTP capability (`totp@1`): what consumers call (`entries`, `code`) and
+   * what provider plugins register with (`register`). Also reachable as
+   * `ctx.totp` from any plugin (inject: ['totp']).
+   */
+  totp: TotpService
+  /**
    * The host (loader) API: the live plugin set and every mutation of it
    * (load/unload/reload/retry/enable/disable/install/uninstall). Also reachable
    * as `ctx.workbench.host()` from any plugin.
@@ -97,6 +104,11 @@ function declaresCredentialProvider(discovery: PluginDiscovery): boolean {
 /** True when a discovered plugin claims an EMAIL provider id (capability `email`). */
 function declaresEmailProvider(discovery: PluginDiscovery): boolean {
   return discovery.capabilities.some((capability) => capability.id === EMAIL && capability.provider !== undefined)
+}
+
+/** True when a discovered plugin claims a TOTP provider id (capability `totp`). */
+function declaresTotpProvider(discovery: PluginDiscovery): boolean {
+  return discovery.capabilities.some((capability) => capability.id === TOTP && capability.provider !== undefined)
 }
 
 /**
@@ -146,6 +158,14 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // provider is a plugin from any source, selected by configuration.
   let email!: EmailService
   await ctx.plugin({ name: EMAIL, apply: (c) => { email = new Email(c) } })
+
+  // The TOTP capability seam (the definition): same shape as email. The service
+  // exists as soon as the kernel boots, so a totp provider plugin can register
+  // with it and a consumer plugin can call `ctx.totp`. It holds NO key, no
+  // storage and no code generator - a provider is a plugin from any source,
+  // selected by configuration.
+  let totp!: TotpService
+  await ctx.plugin({ name: TOTP, apply: (c) => { totp = new Totp(c) } })
 
   // The by-name TOOL INVOCATION surface: the registered tools belong to the
   // plugins, the routes are the core's contract for them. Registered here (the
@@ -219,6 +239,16 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
           source: discovery.source,
           external: discovery.external,
         })
+        continue
+      }
+      if (capability.id === TOTP) {
+        totp.declare({
+          provider: capability.provider,
+          version: capability.version ?? TOTP_VERSION,
+          plugin: discovery.name,
+          source: discovery.source,
+          external: discovery.external,
+        })
       }
     }
   }
@@ -288,11 +318,13 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // in), so that both the selection below and the config references can see them.
   const providers = await loadPlugins(ctx, {
     ...loadOptions,
-    filter: (discovery) => declaresCredentialProvider(discovery) || declaresEmailProvider(discovery),
+    filter: (discovery) =>
+      declaresCredentialProvider(discovery) || declaresEmailProvider(discovery) || declaresTotpProvider(discovery),
   })
   // Provider selection and precedence: CONFIGURATION only, never code.
   credentials.setEnabled(config.credentials?.providers)
   email.setEnabled(config.email?.providers)
+  totp.setEnabled(config.totp?.providers)
 
   // The config loader consumes the capability: `${cred:NAME}`.
   const expanded = (await expandCredentialRefsDeep(
@@ -308,7 +340,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     config: effective,
     // A capability-providing plugin was already applied in phase 1; applying it
     // again would make its registration fail as a duplicate.
-    filter: (discovery) => !declaresCredentialProvider(discovery) && !declaresEmailProvider(discovery),
+    filter: (discovery) =>
+      !declaresCredentialProvider(discovery) && !declaresEmailProvider(discovery) && !declaresTotpProvider(discovery),
   })
 
   const plugins: LoadedPlugin[] = [...providers.plugins, ...rest.plugins]
@@ -339,6 +372,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     credentials,
     web,
     email,
+    totp,
     host,
     configFile,
     get config(): WorkbenchConfig {

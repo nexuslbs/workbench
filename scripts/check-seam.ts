@@ -36,7 +36,7 @@ const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
  * `src/`: a definition module, optional core provider modules, and consumers.
  * Adding a capability here is what puts it under the check.
  */
-const CAPABILITIES = ['credentials', 'email']
+const CAPABILITIES = ['credentials', 'email', 'totp']
 /** Definition modules: `src/<capability>/definition.ts`. */
 const DEFINITIONS = CAPABILITIES.map((capability) => `src/${capability}/definition.ts`)
 /** Provider modules: `src/<capability>/providers/` (a provider may also live in another repo). */

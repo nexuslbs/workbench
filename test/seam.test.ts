@@ -88,6 +88,24 @@ test('the check FAILS when the EMAIL DEFINITION imports a consumer (the contract
   fs.rmSync(root, { recursive: true, force: true })
 })
 
+test('the check FAILS when a CONSUMER imports a TOTP provider module', () => {
+  const root = fixtureRoot({
+    'src/totp/providers/rfc6238.ts': 'export const rfc6238 = 1\n',
+    'src/cli.ts': "import { rfc6238 } from './totp/providers/rfc6238.ts'\nexport const cli = rfc6238\n",
+  })
+  assert.deepEqual(summary(root), ['src/cli.ts (consumer) -> src/totp/providers/rfc6238.ts (provider)'])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('the check FAILS when the TOTP DEFINITION imports a consumer (the contract depends on nobody)', () => {
+  const root = fixtureRoot({
+    'src/config.ts': 'export const config = 1\n',
+    'src/totp/definition.ts': "import { config } from '../config.ts'\nexport const definition = config\n",
+  })
+  assert.deepEqual(summary(root), ['src/totp/definition.ts (definition) -> src/config.ts (consumer)'])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
 test('the check FAILS when the DEFINITION imports a consumer (the contract depends on nobody)', () => {
   const root = fixtureRoot({
     'src/cli.ts': 'export const cli = 1\n',

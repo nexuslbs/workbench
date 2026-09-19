@@ -57,6 +57,12 @@ export { CORE_PROVIDERS, CORE_PROVIDER_IDS, registerCoreProviders, type CoreProv
 // calls as `ctx.email`. Same three-role seam as credentials and web:
 // Provider -> Definition <- Consumer, enforced by `npm run check:seam`.
 export * from './email/definition.ts'
+// The TOTP capability DEFINITION (`totp@1`): the contract a totp PROVIDER plugin
+// implements (entries() as metadata only, code(label, { at }) for the current
+// code) and a CONSUMER (the totp tools, a UI) calls as `ctx.totp`. Same
+// three-role seam as credentials, web and email:
+// Provider -> Definition <- Consumer, enforced by `npm run check:seam`.
+export * from './totp/definition.ts'
 // The TOOLS capability: the definition (what a consumer plugin registers a named
 // tool with: name, description, parameter schema, handler) and the core HTTP
 // seam that exposes the registry by name (`POST /api/tools/<name>`).

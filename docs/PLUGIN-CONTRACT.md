@@ -453,6 +453,81 @@ registered providers of `email@1` (`--json` for the raw payload) and
 `workbench email accounts` prints the configured account labels and addresses of
 the answering provider. Neither ever prints a credential: accounts carry a
 label, an address and a default flag, never a value.
+## 4f. TOTP capability (`ctx.totp`)
+
+TOTP (time-based one-time passwords) is a capability of the same three-role shape
+as credentials (4b), web (4c) and email (4e): an operator names a key once, and a
+consumer asks for the CURRENT code of that name.
+
+- **Definition** (core, `src/totp/definition.ts`, exported from `src/index.ts`):
+  the typed contract, the `totp@1` version and the `ctx.totp` handle
+  (`inject: ['totp']`). It names NO storage backend, NO config-file format, NO
+  algorithm vocabulary beyond the contract types and no code generator: an
+  external provider must be implementable from the definition plus this document
+  alone. It also holds NO key material - a key never crosses the contract.
+- **Provider**: an implementation of the contract. Its manifest declares the
+  provider id it answers for, which is what makes `ctx.totp.register()` legal and
+  what makes the provider SELECTABLE by configuration:
+
+  ```json
+  {
+    "name": "totp-rfc6238",
+    "entry": "index.ts",
+    "capabilities": [{ "id": "totp", "version": 1, "provider": "rfc6238" }]
+  }
+  ```
+
+  A provider implements `entries()` and `code(label, { at? })` only.
+- **Consumer**: uses `ctx.totp` alone, never a provider module. The plugins repo
+  ships `totp-tools`, which registers the tools `totp list` and `totp code`
+  through `ctx.workbench.registerTool` (4d), reachable over HTTP like every
+  other tool.
+
+| Member | Meaning |
+| --- | --- |
+| `ctx.totp.entries()` | The configured entries as METADATA ONLY: `{ label, issuer?, account?, digits, period, algorithm, configured }`. A SECRET VALUE never appears here, in the inventory, in a log or in an error. |
+| `ctx.totp.code(label, { at? })` | The CURRENT code of the entry `label`: `{ label, code, digits, period, algorithm, generatedAt, remainingSeconds }`. `at` is unix SECONDS and exists for deterministic tests and boundary checks; omitted means now. |
+| `ctx.totp.providers()` / `enabled()` / `setEnabled(ids)` | The provider roster and selection, exactly as in 4b/4e (`totp.providers` in the config fixes precedence; absent enables every declared provider). |
+
+The code is derived as RFC 6238 says: `step = floor(at / period)`, so the step
+rolls over exactly at `period` boundaries and `remainingSeconds` is
+`period - (at % period)` (always 1..period, the value `period` meaning the step
+just started). A generator never shifts the clock; a verifier is the side that
+typically accepts +/-1 step of skew (RFC 6238 section 5.2).
+
+Errors are structured, never fatal: an unknown label is a
+`TotpUnknownEntryError`-shaped error naming the label and the configured labels,
+and an entry whose key cannot be resolved is a `TotpEntryNotConfiguredError`-shaped
+one. Contract rule 6 applies: a plugin whose entries have no usable key stays
+LOADED, reports those entries as `configured: false` and is never listed under
+`failures`; only a `code()` call for such an entry fails.
+
+The provider row (an external provider's own configuration, never the contract):
+
+```yaml
+plugins:
+  totp-rfc6238:
+    entries:
+      github:
+        secret: ${cred:TOTP_GITHUB_KEY}   # the reference form: preferred
+        issuer: GitHub
+        account: me@example.com
+      aws-root:
+        secret: JBSWY3DPEHPK3PXP          # a literal base32 key also works
+        digits: 6
+        period: 30
+        algorithm: SHA1
+```
+
+Secrets are referenced, not written: `${cred:NAME}` is expanded by the core
+before the plugin applies, and a plugin can also take a credential NAME and
+resolve it at call time. Committing a real key is forbidden; the contract never
+returns one (a key leaves a provider only as a generated code). The capability is
+covered by `npm run check:seam` (`totp` joins the `credentials`/`email`
+definition/provider/consumer rules). A working external provider (RFC 4226/6238
+on `node:crypto`) plus consumer live in `nexuslbs/workbench-plugins`
+(`plugins/totp-rfc6238`, `plugins/totp-tools`).
+
 ## 5. How an external source is added
 
 The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /
