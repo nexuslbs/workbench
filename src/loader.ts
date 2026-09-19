@@ -60,9 +60,12 @@ export interface LoadOptions {
   includeExternal: boolean
   log: (message: string) => void
   /**
-   * Called for every discovered plugin BEFORE its entry module is imported, so
-   * the core can act on the manifest declarations (the credentials provider ids
-   * a plugin claims) before the plugin registers its services.
+   * Called for every plugin about to be LOADED (a roster member, not parked)
+   * BEFORE its entry module is imported, so the core can act on the manifest
+   * declarations (the credentials provider ids a plugin claims) before the
+   * plugin registers its services. A discovered plugin with no
+   * `plugins.<name>` row is `available` and is never imported, so `declare` is
+   * not called for it either.
    */
   declare?: (discovery: PluginDiscovery) => void
   /** Loads only the discovered plugins this predicate accepts (two-phase loading). */

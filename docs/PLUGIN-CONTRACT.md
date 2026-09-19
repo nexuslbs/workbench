@@ -90,11 +90,12 @@ Rules:
    tree. Plugins are self-contained and must not depend on another repository's
    runtime (an external plugin must not import the core package - the context
    service is the whole interface).
-6. **`apply()` must not require optional config.** Every discovered plugin is
-   applied - with `{}` when the config has no `plugins.<name>` row (see below) -
-   so a plugin whose capability needs configuration must stay LOADABLE without
-   it: report a "not configured" state gracefully and fail only when the
-   capability is actually used. An `apply()` that THROWS is a load failure (it is
+6. **`apply()` must not require optional config.** Only a plugin the config
+   NAMES under `plugins:` is applied (see "Sources, the ROSTER and the
+   `disabled` park" below); its row is its config and is `{}` when the row has no
+   fields. A plugin whose capability needs configuration must therefore stay
+   LOADABLE with an empty row: report a "not configured" state gracefully and
+   fail only when the capability is actually used. An `apply()` that THROWS is a load failure (it is
    listed under `failures`); "not configured" is not an error and must never be
    reported as one.
 7. **A manifest capability is DECLARED before the plugin is applied.** When a
@@ -124,7 +125,10 @@ only when the config names it under `plugins:`.
   configured, deliberately off), the plugin is NOT imported and it is reported
   under `disabled`, never under `failures`. It is a config edit, so it survives a
   restart, and the plugin manager UI persists exactly this key (enable creates
-  or clears it, disable sets it).
+  or clears it, disable sets it);
+- plugin NAMES are unique across sources: when two sources expose the same name,
+  resolution is deterministic - the FIRST source in `sources:` order wins - and
+  the later discovery is reported under `failures` and is never loaded.
 
 The row is the plugin's config AND its selection, so `apply()` is only ever
 called for a plugin the operator asked for - which is why a named plugin can
