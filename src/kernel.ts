@@ -189,8 +189,21 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
    * handlers read the live host/registry, so they follow load/unload/reload.
    */
   const registerCoreRoutes = (web: WebSeam): void => {
-    web.route({ method: 'GET', path: '/health', handler: statusHandler, description: 'the loader status (core)' })
-    web.route({ method: 'HEAD', path: '/health', handler: statusHandler, description: 'the loader status (core)' })
+    // `/health` belongs to the LISTENER owner: the real provider plugin
+    // (`web-impl`) registers its own `/health` - the `web@1` contract plus the live
+    // inventory - BEFORE the core gets here, and the seam throws on a duplicate
+    // method+path, which would abort the whole boot (found by the CI replay of
+    // task 2486). So the core registers its status route only when the seam does
+    // not answer that method+path yet: it is the FALLBACK for a provider that
+    // serves the seam without a health route.
+    const answered = (method: string, path: string): boolean =>
+      (web.routes?.() ?? []).some((route) => route.method === method && route.path === path)
+    if (!answered('GET', '/health')) {
+      web.route({ method: 'GET', path: '/health', handler: statusHandler, description: 'the loader status (core)' })
+    }
+    if (!answered('HEAD', '/health')) {
+      web.route({ method: 'HEAD', path: '/health', handler: statusHandler, description: 'the loader status (core)' })
+    }
     web.route({
       method: 'GET',
       path: '/api/plugins',

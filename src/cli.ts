@@ -16,7 +16,7 @@ import type { LoadedPlugin, PluginDiscoveryInfo } from './types.ts'
  */
 interface WebSeamRead extends WebSeam {
   pages(): { title: string; path: string; plugin: string }[]
-  routes(): unknown[]
+  routes(): { method: string; path: string; description?: string }[]
   assets(): unknown[]
 }
 

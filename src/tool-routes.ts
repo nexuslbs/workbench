@@ -65,9 +65,23 @@ export interface WebResponse {
   body?: string | Uint8Array
 }
 
+/** One route the seam already answers (read before the core registers its own). */
+export interface WebRouteInfo {
+  method: string
+  path: string
+}
+
 /** The seam the routes are registered on (a `web@1` provider plugin provides it). */
 export interface WebSeam {
   route(spec: WebRouteSpec): () => void
+  /**
+   * The routes registered so far, when the provider plugin exposes them. The core
+   * reads this before registering ITS OWN `/health`: a provider that already
+   * answers that method+path OWNS it (the real `web-impl` registers the deployment
+   * healthcheck, carrying the `web@1` contract and the live inventory), and the
+   * seam REJECTS a duplicate method+path.
+   */
+  routes?(): WebRouteInfo[]
 }
 import { TOOLS_CONTRACT, ToolArgsError, ToolUnknownError, type ToolInfo } from './tool-registry.ts'
 

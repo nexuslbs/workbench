@@ -27,7 +27,7 @@ import { ROOT } from './fixtures.ts'
 import { createKernel } from '../src/kernel.ts'
 
 /** A generated PATH source holding one plugin that PROVIDES the `web` seam. */
-function webProviderFixture(): { dir: string; source: string } {
+function webProviderFixture(options: { servesHealth?: boolean } = {}): { dir: string; source: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-web-provider-'))
   const source = path.join(dir, 'plugins')
   const pluginDir = path.join(source, 'web-impl-fixture')
@@ -48,6 +48,13 @@ function webProviderFixture(): { dir: string; source: string } {
       2,
     ) + '\n',
   )
+  // A fixture that answers `/health` ITSELF, exactly like the real `web-impl`
+  // provider: the core must then NOT register a second handler for the same
+  // method+path (the `web@1` seam rejects a duplicate and that aborts the boot).
+  const healthRegistration = options.servesHealth
+    ? "  seam.route({ method: 'GET', path: '/health', description: 'fixture health' })\n" +
+      "  seam.route({ method: 'HEAD', path: '/health', description: 'fixture health' })\n"
+    : ''
   fs.writeFileSync(
     path.join(pluginDir, 'index.js'),
     `export const name = 'web-impl-fixture'
@@ -56,7 +63,7 @@ export function apply(ctx) {
   const specs = []
   // The seam a real provider plugin provides. The core must register its own
   // routes on THIS object (it creates nothing itself).
-  ctx.provide('web', {
+  const seam = {
     route: (spec) => {
       specs.push(spec)
       return () => {
@@ -67,7 +74,9 @@ export function apply(ctx) {
     routes: () => [...specs],
     pages: () => [],
     assets: () => [],
-  })
+  }
+  ctx.provide('web', seam)
+${healthRegistration}
   // How the test reads the routes the CORE registered on a foreign seam.
   ctx.effect(() => ctx.workbench.registerCommand({
     name: 'seam routes',
@@ -157,6 +166,42 @@ test('a provider PLUGIN serves the seam and the core registers its own routes on
     assert.ok(routes.includes('GET /health'), `the core registered its status route on the plugin seam (${routes.join(', ')})`)
     assert.ok(routes.includes('GET /api/plugins'), 'the core registered its inventory route on the plugin seam')
     assert.ok(routes.some((route) => route.startsWith('POST /api/tools/')), 'the core registered the tool dispatch on the plugin seam')
+  } finally {
+    await kernel.dispose()
+    fs.rmSync(fixture.dir, { recursive: true, force: true })
+  }
+})
+
+test('a provider that answers /health ITSELF is not double-registered by the core', async () => {
+  // The real `web-impl` provider registers GET/HEAD /health (the `web@1` contract
+  // plus the live inventory) during its own apply, BEFORE the core registers its
+  // routes. The `web@1` seam REJECTS a duplicate method+path, so an unconditional
+  // core registration aborted the whole boot (found by the CI replay: the
+  // workbench container exited 1 in the deployment shape, task 2486). The core
+  // must treat the provider's /health as the deployment healthcheck and fill the
+  // gap only when the provider answers none.
+  const fixture = webProviderFixture({ servesHealth: true })
+  const kernel = await createKernel({
+    config: {
+      sources: [{ kind: 'path', id: 'web-fixture-health', path: fixture.source, external: false }],
+      plugins: { 'web-impl-fixture': {} },
+      web: { enabled: true },
+    },
+    configDir: fixture.dir,
+    log: () => {},
+  })
+  try {
+    assert.equal(kernel.webState.state, 'served')
+    const found = kernel.registry.resolve(['seam', 'routes'])
+    assert.ok(found, 'the fixture registered its reporting command')
+    const routes = JSON.parse(String(await found.command.run(found.args))) as string[]
+    assert.equal(
+      routes.filter((route) => route === 'GET /health').length,
+      1,
+      `exactly ONE GET /health handler on the seam (${routes.join(', ')})`,
+    )
+    assert.equal(routes.filter((route) => route === 'HEAD /health').length, 1, 'exactly one HEAD /health handler')
+    assert.ok(routes.includes('GET /api/plugins'), 'the core still registers the routes the provider does NOT answer')
   } finally {
     await kernel.dispose()
     fs.rmSync(fixture.dir, { recursive: true, force: true })
