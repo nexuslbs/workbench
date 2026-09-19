@@ -195,6 +195,34 @@ export function loadPhase(discovery: { capabilities: CapabilityDeclaration[] }):
   return contributesCredentials(discovery) ? 1 : 0
 }
 
+/** The capability id of the web seam (`web@1`); its Definition lives in the plugins repository. */
+export const WEB_CAPABILITY = 'web'
+
+/**
+ * The manifest capability prefixes that mark a MANAGEMENT plugin: one that
+ * declares a page or a route on the `web@1` seam, i.e. a plugin that makes the
+ * RUNNING process mutable from inside (`plugin-manager`, `settings`,
+ * `plugin-inventory`, a config watcher).
+ */
+export const MANAGEMENT_CAPABILITY_PREFIXES: readonly string[] = ['web:page:', 'web:route:']
+
+/** True when a discovered plugin HOSTS the HTTP surface (declares a `web@1` provider). */
+export function hostsWebSurface(discovery: { capabilities: CapabilityDeclaration[] }): boolean {
+  return discovery.capabilities.some((capability) => capability.id === WEB_CAPABILITY && capability.provider !== undefined)
+}
+
+/**
+ * True when a discovered plugin CONTRIBUTES a management surface (a page or a
+ * route on the seam). The core hard-codes no plugin name: the state of the
+ * in-process mutation surface is derived from the capability declarations, so a
+ * new management plugin is recognised without touching the core.
+ */
+export function providesManagementSurface(discovery: { capabilities: CapabilityDeclaration[] }): boolean {
+  return discovery.capabilities.some((capability) =>
+    MANAGEMENT_CAPABILITY_PREFIXES.some((prefix) => capability.id.startsWith(prefix)),
+  )
+}
+
 /**
  * True when a config entry DEPENDS on the credentials service: a `git` source
  * `auth:` block, or a `$` + `{cred:...}` reference anywhere in its JSON. Such an

@@ -114,8 +114,74 @@ Environment (all optional):
 | Variable | Meaning |
 | --- | --- |
 | `CONFIG_FILE` | Config file to use when `--config` is not given; empty/unset = the default lookup described below. |
+| `WORKBENCH_CONTROL_SOCKET` | Path of the OUT-OF-BAND control socket `serve`/`web` serve (default `<tmpdir>/workbench-control-<hash of the config path>.sock`). See "Applying a config change to a RUNNING process". |
 | `WORKBENCH_PORT` | The port a DEPLOYMENT publishes; `serve` exports it (and `--port` / `--web-port`) into the environment the web provider plugin reads. The core binds nothing itself. |
 | `WORKBENCH_CACHE_DIR` | Where `git` plugin sources are checked out (default `<config dir>/.workbench/sources`). |
+
+## Applying a config change to a RUNNING process
+
+The config file is read **once, at boot**: editing it does NOT change a process
+that is already running, and the core implements no signal reload and no watcher
+of its own. A change reaches a running process in three ways, plus a restart:
+
+1. **In-process, when the roster loaded a management plugin**: the
+   `plugin-manager` HTTP action (or the Web UI using it) calls the core's
+   `host.reconcile()`: the desired `plugins:` roster is diffed against the live
+   tree and ONLY the delta is applied (load / unload / reload / park).
+2. **Live, through a config-watch plugin**: a roster entry such as `config-watch`
+   (from `nexuslbs/workbench-plugins`) notices an external edit of the file and
+   runs `reloadConfig()` + `host.reconcile()` on the running process.
+3. **Out-of-band, with NO plugin and NO HTTP route at all**:
+
+   ```console
+   $ docker exec <container> node dist/cli.js reconcile
+   workbench: the RUNNING process (pid 1) applied the config change out-of-band via /tmp/workbench-control-3f1c0a9b77d2.sock
+   workbench: reconcile: 25 desired, 4 loaded, 2 change(s)
+     plugin-manager: load - desired and not loaded
+     hello-world: unchanged - already loaded with the same config
+     ok=true loaded=6 deferred=none errors=none
+   ```
+
+   The CLI resolves the config file the SAME way the boot does (`--config` ->
+   `CONFIG_FILE` -> default lookup), derives the control socket of the process
+   that owns THAT config, and asks the RUNNING process to converge - which it
+   does with the very same `host.reconcile()`. Nothing is persisted: the config
+   file is the input. With no live process the command converges a ONE-SHOT
+   process instead (and says so); `--local` forces that and never touches a
+   running process. `--json` prints the full per-plugin report; the exit code is
+   `1` when a row failed to converge, while the other rows still converged.
+
+A restart works too and remains the fallback.
+
+### Why the CORE serves that channel
+
+The in-process mutation surface of a deployment **is itself plugins**
+(`plugin-manager`, `settings`, `plugin-inventory` and the `web@1` provider that
+hosts their routes). A MINIMAL roster therefore boots a process with NO action to
+call at all: the `/api/plugin-manager/action` route simply does not exist and
+nothing can be loaded, so a restart used to be the only way out. To keep the
+converge operation reachable on such a process, the core serves a **unix domain
+socket** while `serve` / `web` run: `$WORKBENCH_CONTROL_SOCKET` or
+`<tmpdir>/workbench-control-<hash of the config path>.sock`, mode `0600`,
+newline-delimited JSON with `ping` / `inventory` / `reconcile`. No TCP port, no
+HTTP server, no plugin is involved - the core still owns no listener a product
+needs, and nothing a deployment serves goes through it. ONE process owns the
+socket: a LIVE channel is never stolen by a second boot (it logs that and keeps
+running without one), while a stale socket FILE from a killed process is taken
+over.
+
+`GET /health`, `/api/plugins` and `workbench plugins` report the state
+explicitly as `mutationSurface: { loaded, listener, providers, candidates,
+controlSocket, remedy }` - `loaded: false` plus the one-line `remedy` is what
+tells an operator that this process needs the out-of-band converge (or a
+restart). Detection is generic, from the manifest capabilities: a `web@1`
+PROVIDER plugin is the `listener`, a plugin declaring `web:page:*` /
+`web:route:*` is a management plugin, and the `candidates` are the discovered
+plugins that would provide the surface. The boot log says the same in one line:
+
+```console
+workbench: 2 plugin(s) loaded of 25 rostered (23 available, 0 disabled, 0 failed); mutation surface: NONE - the process has NO in-process mutation surface (no loaded plugin declares a management page/route): add plugin-manager / plugin-inventory / settings / web-impl to the 'plugins:' roster of <config> and apply it OUT-OF-BAND with 'workbench reconcile' (control socket <socket>), or restart the process
+```
 
 ## Web UI (`web`)
 

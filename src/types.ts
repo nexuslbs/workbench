@@ -239,6 +239,36 @@ export interface CommandInfo {
 }
 
 /**
+ * Whether THIS process exposes an in-process MUTATION surface, and what would
+ * provide it. The mutation surface of a deployment IS plugins (`plugin-manager`,
+ * `settings`, `plugin-inventory`, and the `web@1` provider that hosts the
+ * routes), so a MINIMAL roster can leave a running process with NO action to
+ * call: this is a first-class, visible state, never a silent dead end.
+ *
+ * Detection is GENERIC, from the manifest capability declarations: a plugin that
+ * declares a `web@1` PROVIDER hosts the HTTP surface (the listener), and a
+ * plugin declaring a page/route capability (`web:page:*`, `web:route:*`) is a
+ * management plugin - the core hard-codes no plugin name.
+ */
+export interface MutationSurface {
+  /** True when at least one LOADED plugin declares a management capability. */
+  loaded: boolean
+  /** The loaded plugin hosting the HTTP surface (a `web@1` provider), if any. */
+  listener: string | null
+  /** LOADED plugins declaring a management capability (`web:page:*` / `web:route:*`). */
+  providers: string[]
+  /** DISCOVERED plugins that are not loaded but would provide the surface. */
+  candidates: string[]
+  /**
+   * The OUT-OF-BAND converge channel of this process: a unix socket the core
+   * serves, so the state is applicable without any plugin (see `control.ts`).
+   */
+  controlSocket: string
+  /** One line naming what to do about it (`workbench reconcile`, or a restart). */
+  remedy: string
+}
+
+/**
  * The loader inventory: the read path every consumer uses (`workbench plugins`,
  * the Plugin Inventory UI). It is built from the loader registry only - no
  * consumer scrapes files or config to rebuild it.
@@ -256,6 +286,8 @@ export interface HostInventory {
   available: string[]
   /** Every discovered plugin with its state (loaded, failed, disabled, available). */
   discovered: PluginDiscoveryInfo[]
+  /** Whether this process can still be mutated in-process, and by what. */
+  mutationSurface: MutationSurface
   commands: CommandInfo[]
 }
 

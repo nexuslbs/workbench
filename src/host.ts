@@ -25,15 +25,18 @@ import { readRawConfig, updateConfigFile } from './configfile.ts'
 import {
   CREDENTIAL_REF_TOKEN,
   discoverPlugins,
+  hostsWebSurface,
   isDisabled,
   isRosterMember,
   loadDiscovered,
   loadPhase,
+  providesManagementSurface,
   referencesCredential,
   type LoadFailure,
   type PluginDiscovery,
   type SourceReport,
 } from './loader.ts'
+import { controlSocketPath } from './control.ts'
 import { resolveSource, sourceId, type SourceAuthOutcome } from './sources.ts'
 import {
   renderCapability,
@@ -45,6 +48,7 @@ import {
   type HostInventory,
   type HostReconcileReport,
   type LoadedPlugin,
+  type MutationSurface,
   type PluginDiscoveryInfo,
   type PluginState,
   type ReconcileChange,
@@ -257,8 +261,43 @@ export class Host implements HostApi {
       disabled,
       available,
       discovered,
+      mutationSurface: this.mutationSurface(entries),
       commands: commands.map(({ name, description, plugin }) => ({ name, description, plugin })),
     }
+  }
+
+  /**
+   * The state of the IN-PROCESS mutation surface of this process, derived from
+   * the capability declarations alone (no plugin name is hard-coded): `loaded`
+   * is true once a LOADED plugin declares a management page/route, the
+   * `candidates` are the discovered plugins that are not loaded and would
+   * provide it, and the `remedy` names the OUT-OF-BAND path that applies a
+   * config edit even when nothing in-process can (`workbench reconcile` over
+   * the process's own control channel, or a restart as the fallback).
+   */
+  mutationSurface(entries: HostEntry[]): MutationSurface {
+    const socket = controlSocketPath(this.options.configFile)
+    const providers = entries
+      .filter((entry) => entry.state === 'loaded' && providesManagementSurface(entry.discovery))
+      .map((entry) => entry.discovery.name)
+      .sort()
+    const listener =
+      entries.find((entry) => entry.state === 'loaded' && hostsWebSurface(entry.discovery))?.discovery.name ?? null
+    const candidates = entries
+      .filter(
+        (entry) =>
+          entry.state !== 'loaded' && (providesManagementSurface(entry.discovery) || hostsWebSurface(entry.discovery)),
+      )
+      .map((entry) => entry.discovery.name)
+      .sort()
+    const remedy = providers.length
+      ? `the in-process mutation surface is loaded (${providers.join(', ')}): a config edit can be applied live ` +
+        `through it, or OUT-OF-BAND with 'workbench reconcile' on ${socket}`
+      : `the process has NO in-process mutation surface (no loaded plugin declares a management page/route): ` +
+        `add ${candidates.length ? candidates.join(' / ') : 'a plugin declaring web:page:* / web:route:* (plus a web@1 provider)'} ` +
+        `to the 'plugins:' roster of ${this.options.configFile} and apply it OUT-OF-BAND with 'workbench reconcile' ` +
+        `(control socket ${socket}), or restart the process`
+    return { loaded: providers.length > 0, listener, providers, candidates, controlSocket: socket, remedy }
   }
 
   /** The config file the host edits, or undefined for an inline config. */

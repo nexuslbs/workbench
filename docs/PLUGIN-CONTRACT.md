@@ -329,6 +329,32 @@ entry module that registers its routes, assets and page. Removing it from the
 config leaves the provider (and every other surface) working; removing the
 PROVIDER plugin from the config leaves the core running with `web: deferred`.
 
+### Applying a config change: the file is read ONCE, the converge path is not
+
+The config file is read ONCE, at boot. The core implements no watcher and no
+signal reload; a changed file reaches a RUNNING process only through the core's
+`host.reconcile()` operation:
+
+- in-process, when the roster loaded a management plugin (`plugin-manager` and
+  its `/api/plugin-manager/action`, or a plugin exposing `web:route:*`),
+- live, when the roster loaded a WATCHER plugin (`config-watch` runs
+  `reloadConfig()` + `host.reconcile()` on every external edit),
+- OUT-OF-BAND, always: `workbench reconcile` resolves the config the way the
+  boot does and asks the RUNNING process over its unix control socket
+  (`$WORKBENCH_CONTROL_SOCKET`, default `<tmpdir>/workbench-control-<hash>.sock`,
+  ops `ping` / `inventory` / `reconcile`, mode `0600`). This path needs NO plugin
+  and NO HTTP route, which is what keeps it usable when the roster loaded no
+  management plugin at all - the case where the `/api/...` routes do not exist
+  and a restart used to be the only way out. `--local` forces a one-shot
+  converge of the calling process instead.
+
+A plugin therefore never has to own the converge operation: it either CALLS
+`ctx.workbench.host()` for a load/reconcile, or it exposes a route that does.
+The inventory surface (`/health`, `/api/plugins`) reports
+`mutationSurface: { loaded, listener, providers, candidates, controlSocket,
+remedy }` - `loaded: false` names the plugins that would provide it and the
+remedy, instead of leaving the operator with a silent dead end.
+
 ## 4d. Tools capability (`ctx.tools.registerTool`)
 
 The tools capability lives ENTIRELY in the public plugins repository

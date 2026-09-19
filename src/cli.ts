@@ -4,8 +4,9 @@ import { fileURLToPath } from 'node:url'
 import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
 import { CREDENTIALS_CONTRACT, parseCredentialRef, refLabel } from './credentials/definition.ts'
 import { createKernel, type Kernel } from './kernel.ts'
+import { controlSocketPath, reconcileViaControlChannel, startControlChannel } from './control.ts'
 import type { WebSeam } from './web-seam.ts'
-import type { LoadedPlugin, PluginDiscoveryInfo } from './types.ts'
+import type { HostReconcileReport, LoadedPlugin, PluginDiscoveryInfo } from './types.ts'
 
 /**
  * The READ side of the `web@1` seam, declared structurally on purpose: the
@@ -43,13 +44,19 @@ Usage:
                                   running (the UI listener belongs to the plugin)
   workbench <command> [args...]   run a command registered by a plugin
   workbench plugins               list loaded plugins and their sources
-  workbench reconcile             apply a config-file edit to the RUNNING process:
-                                  diff the desired plugins: roster against the
-                                  loaded set and apply ONLY the delta (load /
+  workbench reconcile [--local]   apply a config-file edit to the RUNNING process
+                                  OUT-OF-BAND (no plugin, no HTTP route needed):
+                                  like the boot it resolves the config (--config ->
+                                  CONFIG_FILE -> default) and reaches the control
+                                  socket of THAT process, which applies ONLY the
+                                  delta of its desired plugins: roster (load /
                                   unload / reload / park); nothing is persisted,
-                                  the config FILE is the input (--json for the
-                                  full per-plugin report; exit 1 when a row
-                                  failed, the others still converged)
+                                  the config FILE is the input. With NO live
+                                  process it converges a ONE-SHOT process instead
+                                  (--local forces that and never touches a
+                                  running one); --json prints the full per-plugin
+                                  report; exit 1 when a row failed, the others
+                                  still converged
   workbench commands              list registered commands
   workbench tools                 list registered tools with their parameter schemas
                                   (a command of the TOOLS plugin - the core ships
@@ -102,6 +109,8 @@ Environment:
 interface Flags {
   configFile?: string
   includeExternal: boolean
+  /** `reconcile --local`: converge a ONE-SHOT process, never a running one. */
+  local: boolean
   json: boolean
   port?: number
   /** `--host`: the Web UI listener host. */
@@ -112,7 +121,7 @@ interface Flags {
 }
 
 function parseArgs(argv: string[]): Flags {
-  const flags: Flags = { includeExternal: true, json: false, rest: [] }
+  const flags: Flags = { includeExternal: true, json: false, local: false, rest: [] }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--config') {
@@ -138,6 +147,7 @@ function parseArgs(argv: string[]): Flags {
       flags.webPort = webPort
     }
     else if (arg === '--no-external') flags.includeExternal = false
+    else if (arg === '--local') flags.local = true
     else if (arg === '--json') flags.json = true
     else flags.rest.push(arg)
   }
@@ -366,6 +376,54 @@ async function web(kernel: Kernel, flags: Flags): Promise<void> {
   await serve(kernel)
 }
 
+/**
+ * Serves the OUT-OF-BAND control channel of a long-running process for as long
+ * as it runs (see `control.ts`): a deployment can end up with a MINIMAL roster
+ * that loaded NO management plugin, and then the in-process mutation surface
+ * simply does not exist - there is no route to call. The channel keeps
+ * `host.reconcile()` reachable on such a process (no plugin, no HTTP route, no
+ * extra port), so a config edit is applied by `workbench reconcile` against the
+ * RUNNING process instead of a restart.
+ */
+async function withControlChannel(kernel: Kernel, body: () => Promise<void>): Promise<void> {
+  const control = await startControlChannel({
+    socketPath: controlSocketPath(kernel.configFile),
+    configFile: kernel.configFile,
+    inventory: () => kernel.host.inventory(),
+    reconcile: () => kernel.host.reconcile(),
+    log: (message) => process.stdout.write(`workbench: ${message}\n`),
+  })
+  try {
+    await body()
+  } finally {
+    await control?.close()
+  }
+}
+
+/**
+ * Renders ONE `host.reconcile()` report. The SAME rendering serves the converge
+ * this process performed itself and the one a RUNNING process reported back over
+ * its control channel - a caller must not be able to tell them apart.
+ */
+function printReconcileReport(report: HostReconcileReport, json: boolean, header?: string): void {
+  if (header !== undefined) process.stdout.write(header + '\n')
+  if (json) {
+    process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+    return
+  }
+  process.stdout.write(report.message + '\n')
+  for (const change of report.changes) {
+    process.stdout.write(
+      `  ${change.name}: ${change.action}${change.desired ? '' : ' (no longer desired)'} - ${change.reason}` +
+        `${change.error === undefined ? '' : `: ${change.error}`}\n`,
+    )
+  }
+  process.stdout.write(
+    `  ok=${report.ok} loaded=${report.loaded} deferred=${report.deferred.length ? report.deferred.join(', ') : 'none'} ` +
+      `errors=${report.errors.length ? report.errors.join(', ') : 'none'}\n`,
+  )
+}
+
 async function main(): Promise<void> {
   const flags = parseArgs(process.argv.slice(2))
   const [head] = flags.rest
@@ -378,10 +436,43 @@ async function main(): Promise<void> {
     return
   }
 
+  // `reconcile` is the OUT-OF-BAND converge: it reaches the RUNNING process that
+  // owns THIS config (the same resolution as the boot: --config -> CONFIG_FILE ->
+  // default) through the control channel that process serves, and only falls back
+  // to a one-shot process of its own when nothing answers. That is the recovery
+  // path of a deployment whose roster loaded NO management plugin at all: there
+  // is no HTTP action to call, and this needs none - no plugin, no route, no
+  // extra port (`--local` skips the running process entirely).
+  if (head === 'reconcile' && !flags.local) {
+    const configFile = resolveConfigFile(flags)
+    const socket = controlSocketPath(configFile)
+    const answer = await reconcileViaControlChannel(socket)
+    if (answer?.report !== undefined) {
+      printReconcileReport(
+        answer.report,
+        flags.json,
+        `workbench: the RUNNING process (pid ${answer.pid}) applied the config change out-of-band via ${socket}`,
+      )
+      process.exitCode = answer.report.ok ? 0 : 1
+      return
+    }
+    if (answer !== undefined) {
+      process.stderr.write(
+        `workbench: the control channel ${socket} (pid ${answer.pid}) did not converge: ${answer.error ?? 'unknown error'}\n`,
+      )
+      process.exitCode = 1
+      return
+    }
+    process.stderr.write(
+      `workbench: no live workbench process serves the control channel ${socket} for ${configFile}; ` +
+        `converging a ONE-SHOT process instead - a running process, if any, is NOT changed\n`,
+    )
+  }
+
   if (head === 'serve') {
     const kernel = await createKernel({ configFile: resolveConfigFile(flags), includeExternal: flags.includeExternal })
     try {
-      await serve(kernel)
+      await withControlChannel(kernel, () => serve(kernel))
     } finally {
       await kernel.dispose()
     }
@@ -391,7 +482,7 @@ async function main(): Promise<void> {
   if (head === 'web') {
     const kernel = await createKernel({ configFile: resolveConfigFile(flags), includeExternal: flags.includeExternal })
     try {
-      await web(kernel, flags)
+      await withControlChannel(kernel, () => web(kernel, flags))
     } finally {
       await kernel.dispose()
     }
@@ -407,28 +498,25 @@ async function main(): Promise<void> {
         return
       }
       process.stdout.write(summaryLine(kernel) + '\n')
+      const surface = inventory.mutationSurface
+      process.stdout.write(
+        `  mutation surface: ${surface.loaded ? `in-process (${surface.providers.join(', ')})` : 'NONE - no loaded plugin declares a management page/route'}` +
+          `${surface.candidates.length ? `; candidates on the roster away: ${surface.candidates.join(', ')}` : ''}\n`,
+      )
+      if (!surface.loaded) {
+        process.stdout.write(`  remedy: ${surface.remedy}\n`)
+        process.stdout.write(`  out-of-band: workbench reconcile   (control socket ${surface.controlSocket})\n`)
+      }
       for (const source of kernel.sources) process.stdout.write(describeSource(source) + '\n')
       for (const entry of inventory.discovered) process.stdout.write(`  ${describeDiscovery(entry)}\n`)
       return
     }
 
     if (head === 'reconcile') {
+      // No live channel answered (or `--local` was given): converge THIS one-shot
+      // process with the SAME operation the running process uses.
       const report = await kernel.host.reconcile()
-      if (flags.json) {
-        process.stdout.write(JSON.stringify(report, null, 2) + '\n')
-      } else {
-        process.stdout.write(report.message + '\n')
-        for (const change of report.changes) {
-          process.stdout.write(
-            `  ${change.name}: ${change.action}${change.desired ? '' : ' (no longer desired)'} - ${change.reason}` +
-              `${change.error === undefined ? '' : `: ${change.error}`}\n`,
-          )
-        }
-        process.stdout.write(
-          `  ok=${report.ok} loaded=${report.loaded} deferred=${report.deferred.length ? report.deferred.join(', ') : 'none'} ` +
-            `errors=${report.errors.length ? report.errors.join(', ') : 'none'}\n`,
-        )
-      }
+      printReconcileReport(report, flags.json)
       // A row that failed leaves the process running: the exit code is what tells
       // a script that the roster did NOT fully converge.
       process.exitCode = report.ok ? 0 : 1

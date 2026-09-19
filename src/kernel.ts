@@ -148,18 +148,24 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // load), so the plugin-less core still ANSWERS instead of 404ing without owning
   // any web code. With no provider loaded the seam never exists, nothing is
   // registered, and {@link Kernel.webState} reports the DEFERRED state loudly.
-  const statusPayload = (): string =>
-    JSON.stringify(
+  const statusPayload = (): string => {
+    const inventory = host.inventory()
+    return JSON.stringify(
       {
         status: 'ok',
         configFile,
-        plugins: host.inventory().plugins,
-        sources: host.inventory().sources,
-        failures: host.inventory().failures,
+        plugins: inventory.plugins,
+        sources: inventory.sources,
+        failures: inventory.failures,
+        // The state a deployment must see when its roster loaded no management
+        // plugin at all: without this the running process is a silent dead end
+        // (no action can be called, and nothing says why).
+        mutationSurface: inventory.mutationSurface,
       },
       null,
       2,
     )
+  }
   const statusHandler = (request: WebRequest): WebResponse | undefined => {
     if (request.method !== 'GET' && request.method !== 'HEAD') return undefined
     if (request.path !== '/health' && request.path !== '/healthz') return undefined
@@ -177,6 +183,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
           available: inventory.available,
           failures: inventory.failures,
           sources: inventory.sources,
+          mutationSurface: inventory.mutationSurface,
         },
         null,
         2,
@@ -505,6 +512,22 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // The core's own routes on the seam, registered only when a provider plugin
   // actually provided `ctx.web` (a deployment running the web provider).
   if (webSeam) registerCoreRoutes(webSeam)
+
+  // The roster the FILE asks for versus the set that actually LOADED is a
+  // first-class state, said in ONE line: a process that booted 2 plugins of 23
+  // rostered has no in-process mutation surface to call, and the operator must
+  // not have to guess why (the remedy is the out-of-band converge, see
+  // `control.ts` - `workbench reconcile` against the RUNNING process).
+  const bootInventory = host.inventory()
+  const rostered = Object.keys(config.plugins ?? {}).length
+  log(
+    `[workbench] ${bootInventory.plugins.length} plugin(s) loaded of ${rostered} rostered ` +
+      `(${bootInventory.available.length} available, ${bootInventory.disabled.length} disabled, ` +
+      `${bootInventory.failures.length} failed); mutation surface: ` +
+      (bootInventory.mutationSurface.loaded
+        ? `in-process (${bootInventory.mutationSurface.providers.join(', ') || 'declared'})`
+        : `NONE - ${bootInventory.mutationSurface.remedy}`),
+  )
 
   return {
     ctx,
