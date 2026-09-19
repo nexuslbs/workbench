@@ -307,6 +307,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     sourceAuth,
     sourceAuthResolver,
     declare: declarePluginCapabilities,
+    // The `${cred:...}` GATE, re-evaluated LIVE by `host.reconcile()`: a roster
+    // row that needs a credential is DEFERRED while no plugin implementing the
+    // credentials service definition is registered - exactly the boot rule.
+    credentialsReady: hasProvider,
     pluginConfig: async (name, raw) => {
       const expanded = (await expandCredentialRefsDeep(raw, resolver, expansionOptions)) as Record<string, unknown>
       void name

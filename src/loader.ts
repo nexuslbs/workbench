@@ -161,6 +161,54 @@ export function isRosterMember(config: WorkbenchConfig, name: string): boolean {
   return Object.prototype.hasOwnProperty.call(config.plugins ?? {}, name)
 }
 
+/** The capability id of the credentials service DEFINITION (`credentials@1`). */
+export const CREDENTIALS_CAPABILITY = 'credentials'
+
+/**
+ * The `$` + `{cred:` marker of a credential reference, spelled without a literal
+ * so the token never looks like an interpolated value in this source.
+ */
+export const CREDENTIAL_REF_TOKEN = '$' + '{cred:'
+
+/**
+ * True when a discovered plugin CONTRIBUTES to the credentials capability: a
+ * PROVIDER (a capability declaration carrying a provider id) or a GIT AUTH
+ * STRATEGY (a declaration without one, e.g. `credentials-github-app`, which
+ * mints from a value the providers resolved). Both are loaded BEFORE any
+ * credential-dependent source or plugin is resolved: a strategy plugin is
+ * useless if it arrives after the entry that needs it.
+ *
+ * The boot (`kernel.ts`, phase 1) and `Host.reconcile()` share this predicate,
+ * so the two load paths can never disagree on the ORDER a plugin needs.
+ */
+export function contributesCredentials(discovery: { capabilities: CapabilityDeclaration[] }): boolean {
+  return discovery.capabilities.some((capability) => capability.id === CREDENTIALS_CAPABILITY)
+}
+
+/**
+ * The BOOT PHASE of a plugin: `1` = a credentials CONTRIBUTOR (provider or git
+ * auth strategy), `0` = everything else. The boot loads phase 1 first; a
+ * reconcile sorts the desired roster by this phase so a provider added in the
+ * SAME generation is registered before the `${cred:...}` rows that need it.
+ */
+export function loadPhase(discovery: { capabilities: CapabilityDeclaration[] }): 0 | 1 {
+  return contributesCredentials(discovery) ? 1 : 0
+}
+
+/**
+ * True when a config entry DEPENDS on the credentials service: a `git` source
+ * `auth:` block, or a `$` + `{cred:...}` reference anywhere in its JSON. Such an
+ * entry implicitly depends on a plugin implementing the credentials service
+ * definition, so it is DEFERRED - never loaded, never expanded first, never a
+ * crash, never a silent skip - until one is loaded. The core ships NO provider
+ * and resolves no credential itself.
+ */
+export function referencesCredential(raw: unknown): boolean {
+  const record = (raw ?? {}) as { auth?: unknown }
+  if (record.auth !== undefined) return true
+  return JSON.stringify(raw ?? null).includes(CREDENTIAL_REF_TOKEN)
+}
+
 /**
  * Walks every configured source and reports the plugins it holds, WITHOUT
  * importing anything. This is the discovery half of {@link loadPlugins} and the

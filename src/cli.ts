@@ -43,6 +43,13 @@ Usage:
                                   running (the UI listener belongs to the plugin)
   workbench <command> [args...]   run a command registered by a plugin
   workbench plugins               list loaded plugins and their sources
+  workbench reconcile             apply a config-file edit to the RUNNING process:
+                                  diff the desired plugins: roster against the
+                                  loaded set and apply ONLY the delta (load /
+                                  unload / reload / park); nothing is persisted,
+                                  the config FILE is the input (--json for the
+                                  full per-plugin report; exit 1 when a row
+                                  failed, the others still converged)
   workbench commands              list registered commands
   workbench tools                 list registered tools with their parameter schemas
                                   (a command of the TOOLS plugin - the core ships
@@ -402,6 +409,29 @@ async function main(): Promise<void> {
       process.stdout.write(summaryLine(kernel) + '\n')
       for (const source of kernel.sources) process.stdout.write(describeSource(source) + '\n')
       for (const entry of inventory.discovered) process.stdout.write(`  ${describeDiscovery(entry)}\n`)
+      return
+    }
+
+    if (head === 'reconcile') {
+      const report = await kernel.host.reconcile()
+      if (flags.json) {
+        process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+      } else {
+        process.stdout.write(report.message + '\n')
+        for (const change of report.changes) {
+          process.stdout.write(
+            `  ${change.name}: ${change.action}${change.desired ? '' : ' (no longer desired)'} - ${change.reason}` +
+              `${change.error === undefined ? '' : `: ${change.error}`}\n`,
+          )
+        }
+        process.stdout.write(
+          `  ok=${report.ok} loaded=${report.loaded} deferred=${report.deferred.length ? report.deferred.join(', ') : 'none'} ` +
+            `errors=${report.errors.length ? report.errors.join(', ') : 'none'}\n`,
+        )
+      }
+      // A row that failed leaves the process running: the exit code is what tells
+      // a script that the roster did NOT fully converge.
+      process.exitCode = report.ok ? 0 : 1
       return
     }
 

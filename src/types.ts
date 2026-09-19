@@ -269,6 +269,7 @@ export type HostAction =
   | 'retry'
   | 'install-source'
   | 'remove-source'
+  | 'reconcile'
 
 /** What a host action did, with the before/after inventory (the refresh). */
 export interface HostActionResult {
@@ -282,6 +283,56 @@ export interface HostActionResult {
   before: HostInventory
   after: HostInventory
   message: string
+}
+
+/**
+ * What `reconcile` did to ONE plugin of the DESIRED roster.
+ *
+ * - `load`: a desired row that was not loaded (or not loaded any more) is now,
+ * - `unload`: the plugin was loaded and nothing desires it any more (the row was
+ *   removed from the config, or it is parked),
+ * - `reload`: the row's effective config changed, so the fiber was replaced,
+ * - `unchanged`: desired and live state already agreed - no fiber churn,
+ * - `deferred`: the row needs a credential but no plugin implementing the
+ *   credentials service definition is loaded yet (structured, NOT an error),
+ * - `error`: the row could not be applied (import/`apply()` threw, or the row
+ *   config could not be resolved); the OTHER rows still converged.
+ */
+export type ReconcileAction = 'load' | 'unload' | 'reload' | 'unchanged' | 'deferred' | 'error'
+
+/** One plugin of the desired-vs-live diff a reconcile applied. */
+export interface ReconcileChange {
+  /** The plugin name (the `plugins:` key). */
+  name: string
+  /** True when the config FILE names the plugin on the `plugins:` roster. */
+  desired: boolean
+  /** True when the plugin was loaded BEFORE this reconcile ran. */
+  loaded: boolean
+  action: ReconcileAction
+  /** Why that action was chosen / what happened (never a secret value). */
+  reason: string
+  /** The failure message when `action` is `error`. */
+  error?: string
+}
+
+/**
+ * The report of a reconcile: the loader state before and after (like every other
+ * action) PLUS the per-plugin delta and the source re-scan, so a consumer can
+ * show exactly which plugin was loaded, unloaded or reloaded - and which one was
+ * deferred or failed - instead of claiming a convergence.
+ */
+export interface HostReconcileReport extends HostActionResult {
+  action: 'reconcile'
+  /** One entry per desired row, plus every loaded plugin the diff unloaded. */
+  changes: ReconcileChange[]
+  /** Names the config desired but the credentials GATE deferred. */
+  deferred: string[]
+  /** Names whose application failed (the other rows still converged). */
+  errors: string[]
+  /** The sources as re-scanned by this reconcile (the `sources:` walk). */
+  sources: SourceReport[]
+  /** Plugins loaded after the reconcile. */
+  loaded: number
 }
 
 /**
@@ -301,6 +352,12 @@ export interface HostApi {
   disable(name: string): Promise<HostActionResult>
   install(spec: SourceSpec): Promise<HostActionResult>
   uninstall(id: string): Promise<HostActionResult>
+  /**
+   * Applies a config-file edit to the RUNNING process in one operation: diff the
+   * DESIRED `plugins:` roster against the live cordis tree and apply only the
+   * delta (load / unload / reload), leaving every converged plugin untouched.
+   */
+  reconcile(): Promise<HostReconcileReport>
 }
 
 /** One edit of a config file (see {@link ConfigPatch} and the config seam). */

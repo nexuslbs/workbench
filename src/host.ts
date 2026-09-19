@@ -22,7 +22,18 @@ import path from 'node:path'
 import type { Context, Fiber } from 'cordis'
 import { readConfig } from './config.ts'
 import { readRawConfig, updateConfigFile } from './configfile.ts'
-import { discoverPlugins, isDisabled, isRosterMember, loadDiscovered, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
+import {
+  CREDENTIAL_REF_TOKEN,
+  discoverPlugins,
+  isDisabled,
+  isRosterMember,
+  loadDiscovered,
+  loadPhase,
+  referencesCredential,
+  type LoadFailure,
+  type PluginDiscovery,
+  type SourceReport,
+} from './loader.ts'
 import { resolveSource, sourceId, type SourceAuthOutcome } from './sources.ts'
 import {
   renderCapability,
@@ -32,9 +43,11 @@ import {
   type HostActionResult,
   type HostApi,
   type HostInventory,
+  type HostReconcileReport,
   type LoadedPlugin,
   type PluginDiscoveryInfo,
   type PluginState,
+  type ReconcileChange,
   type SourceSpec,
   type WorkbenchConfig,
 } from './types.ts'
@@ -61,6 +74,15 @@ export interface HostOptions {
   config: WorkbenchConfig
   /** Called for every discovery BEFORE import (credential provider declarations). */
   declare?: (discovery: PluginDiscovery) => void
+  /**
+   * True when a plugin implementing the credentials service DEFINITION is loaded
+   * (a provider is registered), i.e. the `${cred:...}` GATE of the boot is open.
+   * `reconcile()` re-evaluates it LIVE: while it returns false a roster row that
+   * needs a credential stays DEFERRED (never expanded, never loaded, never a
+   * crash), exactly like the boot path. Injected by the kernel (composition
+   * root) so the host never names a provider; absent/false = no provider.
+   */
+  credentialsReady?: () => boolean
   /**
    * The config a plugin is instantiated with: the raw `plugins.<name>` value
    * with credential references expanded by the kernel (credential VALUES never
@@ -161,10 +183,17 @@ export class Host implements HostApi {
     for (const plugin of state.plugins) {
       const entry = this.entries.get(plugin.name)
       const fiber = state.fibers.get(plugin.name)
+      // The EFFECTIVE config the boot instantiated the plugin with (`plugins.<name>`
+      // after `${env:}`/`${cred:}` expansion): reconcile compares against it to
+      // choose `unchanged` over `reload`, so a boot that already satisfies the
+      // file is never churned.
+      const config = { ...(state.config.plugins?.[plugin.name] ?? {}) }
+      delete config.disabled
       this.entries.set(plugin.name, {
         discovery: entry?.discovery ?? discoveryOf(plugin),
         state: 'loaded',
         ...(fiber === undefined ? {} : { fiber }),
+        config,
       })
     }
     for (const failure of state.failures) {
@@ -381,7 +410,7 @@ export class Host implements HostApi {
       const config = await this.pluginConfigFor(name, raw)
       this.declareCapabilities(discovery)
       const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
-      this.entries.set(name, { discovery, state: 'loaded', fiber })
+      this.entries.set(name, { discovery, state: 'loaded', fiber, config })
       this.syncRegistry()
       return `loaded plugin '${name}' from ${discovery.source}`
     })
@@ -417,7 +446,7 @@ export class Host implements HostApi {
       const config = await this.pluginConfigFor(name, raw)
       this.declareCapabilities(discovery)
       const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
-      this.entries.set(name, { discovery, state: 'loaded', fiber })
+      this.entries.set(name, { discovery, state: 'loaded', fiber, config })
       this.syncRegistry()
       return `reloaded plugin '${name}' from ${discovery.source}`
     })
@@ -435,7 +464,7 @@ export class Host implements HostApi {
       const config = await this.pluginConfigFor(name, raw)
       this.declareCapabilities(discovery)
       const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
-      this.entries.set(name, { discovery, state: 'loaded', fiber })
+      this.entries.set(name, { discovery, state: 'loaded', fiber, config })
       this.syncRegistry()
       return `retried plugin '${name}' - it loaded from ${discovery.source}`
     })
@@ -474,7 +503,7 @@ export class Host implements HostApi {
       const config = await this.pluginConfigFor(name, raw)
       this.declareCapabilities(discovery)
       const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
-      this.entries.set(name, { discovery, state: 'loaded', fiber })
+      this.entries.set(name, { discovery, state: 'loaded', fiber, config })
       this.syncRegistry()
       const what = onRoster
         ? parked
@@ -567,6 +596,7 @@ export class Host implements HostApi {
           const { fiber } = await loadDiscovered(this.ctx, entry.discovery, config, this.options.log)
           entry.state = 'loaded'
           entry.fiber = fiber
+          entry.config = config
           loaded += 1
         } catch (error) {
           entry.state = 'failed'
@@ -608,6 +638,257 @@ export class Host implements HostApi {
       return `removed source '${id}' (unloaded ${unloaded.length} plugin(s): ${unloaded.join(', ') || 'none'})`
     })
   }
+
+  // -------------------------------------------------------------- reconcile
+
+  /**
+   * Applies the DESIRED roster to the LIVE tree in ONE operation (the
+   * `reconcileProfilePatches` equivalent): the config FILE is the desired state,
+   * `this.entries` is the live state, and only the DELTA is applied - load /
+   * unload / reload / park - leaving every already-converged plugin untouched.
+   * That is what makes a config edit take effect on a RUNNING process without a
+   * restart: the caller edits the file and calls this.
+   *
+   * The desired set is read AS WRITTEN (`writtenConfig()`), so a `${cred:NAME}`
+   * reference stays BY NAME; a row that needs a credential is DEFERRED (never
+   * expanded, never loaded, structured report entry, no crash) while no plugin
+   * implementing the credentials service definition is loaded - the SAME gate as
+   * the boot path. Credentials CONTRIBUTORS are applied FIRST, so a provider
+   * plugin added in this very generation is registered before the rows that
+   * depend on it.
+   *
+   * Nothing is persisted (the file is the input, it is never written) and the
+   * operation is IDEMPOTENT: a second call with an unchanged file reports every
+   * row `unchanged` and replaces no fiber.
+   */
+  async reconcile(): Promise<HostReconcileReport> {
+    const before = this.inventory()
+    const changes: ReconcileChange[] = []
+    let ok = true
+    let message: string
+    try {
+      // The composition, in the order the gates require: re-read the file,
+      // re-resolve the source auths (a newly added private source must be
+      // fetched with its credential), re-scan the sources so a new or removed
+      // plugin becomes visible, then apply the delta.
+      this.reloadConfig()
+      await this.refreshSourceAuths()
+      this.refresh()
+      const summary = await this.applyDesiredRoster(changes)
+      this.syncRegistry()
+      // A provider plugin loaded by THIS call can unblock the `${cred:...}`
+      // sources: re-resolve the auths and re-scan once more, so the report shows
+      // the state the delta actually produced.
+      await this.refreshSourceAuths()
+      this.refresh()
+      message = `reconciled the 'plugins:' roster from ${this.options.configFile}: ${summary}`
+    } catch (error) {
+      ok = false
+      message = `reconcile failed: ${failureMessage(error)}`
+      this.options.log(`host: ${message}`)
+    }
+    const after = this.inventory()
+    const deferred = changes.filter((change) => change.action === 'deferred').map((change) => change.name)
+    const errors = changes.filter((change) => change.action === 'error').map((change) => change.name)
+    // One plugin failing must never hide the others: they converged, the report
+    // says so, and `ok` reflects that the whole conversion did NOT.
+    if (errors.length > 0) ok = false
+    return {
+      ok,
+      action: 'reconcile',
+      target: this.options.configFile,
+      request: {},
+      persisted: false,
+      before,
+      after,
+      message,
+      changes,
+      deferred,
+      errors,
+      sources: [...this.sourceReports],
+      loaded: after.plugins.length,
+    }
+  }
+
+  /**
+   * The desired-vs-live diff and its application. Records one
+   * {@link ReconcileChange} per plugin and returns the human summary of the
+   * generation. A plugin that cannot be applied records `error` and the
+   * remaining plugins STILL converge - one bad row never aborts the roster.
+   */
+  private async applyDesiredRoster(changes: ReconcileChange[]): Promise<string> {
+    // The DESIRED state: the config as written (references stay BY NAME).
+    const roster = (this.writtenConfig().plugins ?? {}) as Record<string, Record<string, unknown>>
+    const desired = Object.keys(roster)
+    const ready = (): boolean => this.options.credentialsReady?.() === true
+    // BOOT ORDERING (the same rule as `kernel.ts`): a credentials CONTRIBUTOR
+    // first, everything else after. The config order is preserved inside a
+    // phase, and a row the scan does not know yet is phase 0.
+    const ordered = desired
+      .map((name, index) => {
+        const discovery = this.entries.get(name)?.discovery
+        return { name, index, phase: discovery === undefined ? 0 : loadPhase(discovery) }
+      })
+      .sort((a, b) => b.phase - a.phase || a.index - b.index)
+      .map((row) => row.name)
+
+    let loaded = 0
+    let reloaded = 0
+    let unloaded = 0
+    let unchanged = 0
+    let deferred = 0
+    let failed = 0
+
+    for (const name of ordered) {
+      const row = { ...roster[name] }
+      const parked = row.disabled === true
+      delete row.disabled
+      const entry = this.entries.get(name)
+      const wasLoaded = entry?.state === 'loaded'
+
+      if (parked) {
+        // `disabled: true` PARKS the row: the roster row stays, the plugin is
+        // not loaded (it is reported under `disabled`, never under `failures`).
+        if (wasLoaded && entry !== undefined) {
+          await this.disposeEntry(entry)
+          entry.state = 'disabled'
+          changes.push({
+            name,
+            desired: true,
+            loaded: true,
+            action: 'unload',
+            reason: "the row is parked ('disabled: true'): the plugin is unloaded and stays on the roster",
+          })
+          unloaded += 1
+        } else {
+          if (entry !== undefined && entry.state !== 'failed') entry.state = 'disabled'
+          changes.push({ name, desired: true, loaded: false, action: 'unchanged', reason: "already parked ('disabled: true'), nothing loaded" })
+          unchanged += 1
+        }
+        continue
+      }
+
+      // THE CREDENTIALS GATE (the boot's rule, re-evaluated LIVE): a row that
+      // needs a credential stays DEFERRED while no plugin implementing the
+      // credentials service definition is loaded. It is NOT an error and NOT a
+      // silent skip: it is a structured report entry, and it becomes eligible as
+      // soon as a provider plugin is loaded.
+      if (referencesCredential(row) && !ready()) {
+        changes.push({
+          name,
+          desired: true,
+          loaded: wasLoaded,
+          action: 'deferred',
+          reason: `the row needs a credential (${CREDENTIAL_REF_TOKEN}...) but no plugin implementing the credentials service definition is loaded yet`,
+        })
+        deferred += 1
+        continue
+      }
+
+      // The EFFECTIVE config: `${env:}` and `${cred:}` references resolved by the
+      // kernel (the host itself never resolves a credential).
+      let config: Record<string, unknown>
+      try {
+        config = await this.pluginConfigFor(name, row)
+      } catch (error) {
+        failed += 1
+        const text = failureText(error)
+        if (entry !== undefined) {
+          entry.state = 'failed'
+          entry.error = text
+        }
+        changes.push({ name, desired: true, loaded: wasLoaded, action: 'error', reason: 'the row config could not be resolved', error: text })
+        continue
+      }
+
+      // Already converged: the plugin is loaded with EXACTLY this config, so no
+      // fiber is touched (the idempotency guarantee).
+      if (wasLoaded && entry?.config !== undefined && stable(entry.config) === stable(config)) {
+        changes.push({ name, desired: true, loaded: true, action: 'unchanged', reason: 'already loaded with this exact config' })
+        unchanged += 1
+        continue
+      }
+
+      const replacing = wasLoaded
+      if (wasLoaded && entry !== undefined) await this.disposeEntry(entry)
+      try {
+        const discovery = this.discoveryOf(name)
+        this.declareCapabilities(discovery)
+        const { fiber } = await loadDiscovered(this.ctx, discovery, config, this.options.log)
+        this.entries.set(name, { discovery, state: 'loaded', fiber, config })
+        if (replacing) {
+          reloaded += 1
+          changes.push({ name, desired: true, loaded: true, action: 'reload', reason: 'the row config changed: the fiber was replaced with the new config' })
+        } else {
+          loaded += 1
+          changes.push({ name, desired: true, loaded: false, action: 'load', reason: `loaded from source '${discovery.source}'` })
+        }
+      } catch (error) {
+        failed += 1
+        const text = failureText(error)
+        const failedEntry = this.entries.get(name)
+        if (failedEntry !== undefined) {
+          failedEntry.state = 'failed'
+          failedEntry.error = text
+        }
+        changes.push({ name, desired: true, loaded: false, action: 'error', reason: 'the plugin could not be applied', error: text })
+      }
+      this.syncRegistry()
+    }
+
+    // The REMOVAL half: a loaded plugin the config no longer desires is unloaded
+    // (its fiber is disposed, so its commands, routes, pages and assets go).
+    for (const name of [...this.entries.keys()].sort()) {
+      if (Object.prototype.hasOwnProperty.call(roster, name)) continue
+      const entry = this.entries.get(name) as HostEntry
+      if (entry.state !== 'loaded') continue
+      await this.disposeEntry(entry)
+      entry.state = this.restState(name)
+      changes.push({ name, desired: false, loaded: true, action: 'unload', reason: "the 'plugins:' roster no longer names the plugin" })
+      unloaded += 1
+    }
+
+    return (
+      `${ordered.length} desired row(s): ${loaded} loaded, ${reloaded} reloaded, ` +
+      `${unloaded} unloaded, ${unchanged} unchanged, ${deferred} deferred, ${failed} error`
+    )
+  }
+
+  /** Disposes a loaded plugin's fiber and drops the config it was loaded with. */
+  private async disposeEntry(entry: HostEntry): Promise<void> {
+    await entry.fiber?.dispose()
+    delete entry.fiber
+    delete entry.config
+    if (entry.state === 'loaded') entry.state = 'available'
+  }
+}
+
+/** The message of an unknown thrown value, with the loader's own inject hint. */
+function failureText(error: unknown): string {
+  const message = failureMessage(error)
+  return message.includes('without inject')
+    ? `${message} - a plugin that uses the core service must declare inject: ['workbench'] in its entry module`
+    : message
+}
+
+/** The message of an unknown thrown value. */
+function failureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * A canonical JSON form (object keys sorted, recursively) so two EQUAL row
+ * configs compare equal whatever their key order: reconcile's `unchanged`
+ * decision must never depend on object insertion order.
+ */
+function stable(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stable(record[key])}`)
+    .join(',')}}`
 }
 
 /** The {@link LoadedPlugin} shape of a discovery. */
