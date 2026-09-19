@@ -34,11 +34,21 @@ sources:
     subdir: plugins
 
 plugins:
-  # Per-plugin config of THIS deployment. The EXTERNAL `hello-world` plugin (from
-  # the git source above) prints this message, which is how the CI proves the
-  # run-time config is honoured - and that an external source is loaded.
+  # Per-plugin config of THIS deployment: every row names a plugin that comes from
+  # the EXTERNAL source above (the image ships ZERO plugins), and a plugin is
+  # LOADED only when it is named here (`sources:` DISCOVERS, `plugins:` LOADS).
+  #
+  # `hello-world` prints this message, which is how the CI proves the run-time
+  # config is honoured - and that an external source is loaded.
   hello-world:
     message: hello from the deployment config
+  # A SECOND plugin of the same external source, so the CI proves more than one
+  # plugin is loaded and that a live change (disable) really removes one.
+  hello-otherworld: {}
+  # The plugin-manager seam the CI drives live (`POST /api/plugin-manager/action`):
+  # installing a source and disabling a plugin must be possible at run time,
+  # without rebuilding the image.
+  plugin-manager: {}
 
 # The Web UI provider. Enabling it exposes the plugin-manager / settings HTTP
 # seams the live add/remove-plugin check drives; the port equals the status port,
