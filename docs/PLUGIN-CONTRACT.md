@@ -722,6 +722,11 @@ Contract:
   `auth` sources. A credential-dependent source with NO provider loaded is
   DEFERRED (reported, no crash, no anonymous fetch); once a provider registers,
   it becomes eligible in the same boot. See `docs/CREDENTIALS.md` section 6.
+- The credentials PHASE (phase 1 above) also loads every plugin that declares the
+  `credentials` capability WITHOUT a `provider` id - a GIT AUTH STRATEGY plugin
+  such as `plugins/credentials-github-app`. The handler for `auth.type` must be
+  registered before the gated source is resolved, so a strategy plugin must be
+  reachable from a credential-free source too.
 - `type: token` (default) sends the value as a basic-auth `http.extraheader`;
   `type: github-app` treats the value as an App PRIVATE KEY (PEM) and mints a
   short-lived installation token (RS256 JWT -> `POST /app/installations/{id}/access_tokens`).

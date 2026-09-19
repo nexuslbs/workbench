@@ -354,6 +354,12 @@ same boot. A provider plugin MUST therefore be reachable from a source that need
 no credential (a `path` source, the PUBLIC `git` source, or a private source whose
 OWN credential is already resolvable). `credentials.bootstrap` no longer exists:
 selection is `credentials.providers` alone (section 3).
+The CREDENTIALS PHASE loads every plugin that declares the `credentials`
+capability, whether it is a PROVIDER (the declaration carries a
+`provider` id) or a GIT AUTH STRATEGY (no id, e.g. the
+`credentials-github-app` plugin). Both must be reachable from a
+credential-free source: a strategy plugin that arrived AFTER the gated
+resolution could not serve the `git` source it exists for.
 
 | Phase | Made of | Available | Used by |
 | --- | --- | --- | --- |

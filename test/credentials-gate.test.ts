@@ -186,3 +186,87 @@ test('the gate defers a credential-dependent PLUGIN row, then loads it once a pr
   assert.equal(await command.run([]), CREDENTIAL_VALUE)
   assert.ok(!liveLines.some((line) => /hello-gated' is DEFERRED/.test(line)))
 })
+
+/** Writes a fixture git auth STRATEGY plugin: the credentials CAPABILITY with NO provider id. */
+function writeStrategyPlugin(dir: string, marker: string): string {
+  const pluginDir = path.join(dir, 'git-auth-fixture')
+  fs.mkdirSync(pluginDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(pluginDir, 'workbench.plugin.json'),
+    JSON.stringify(
+      {
+        name: 'git-auth-fixture',
+        version: '0.1.0',
+        description: 'test fixture: a git auth STRATEGY (credentials capability, no provider id)',
+        entry: 'index.js',
+        capabilities: [{ id: 'credentials', version: 1 }],
+      },
+      null,
+      2,
+    ) + '\n',
+  )
+  fs.writeFileSync(
+    path.join(pluginDir, 'index.js'),
+    `import fs from 'node:fs'
+
+export const name = 'git-auth-fixture'
+
+export function apply(ctx, config = {}) {
+  ctx.effect(() => ctx.credentials.registerGitAuth({
+    type: 'github-app',
+    args: async () => {
+      fs.writeFileSync(config.marker, 'ran')
+      return ['-c', 'credential.helper=', '-c', 'http.extraheader=Authorization: Basic example']
+    },
+  }))
+}
+
+export default { name, inject: ['credentials'], apply }
+`,
+  )
+  return dir
+}
+
+test('the credentials phase loads a git auth STRATEGY plugin (capability, no provider id) before a gated git source resolves', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-gate-strategy-'))
+  const providerSource = writeProviderPlugin(path.join(dir, 'provider-source'))
+  const marker = path.join(dir, 'handler-ran')
+  const strategySource = writeStrategyPlugin(path.join(dir, 'strategy-source'), marker)
+  const lines: string[] = []
+
+  const kernel = await createKernel({
+    config: {
+      sources: [
+        { kind: 'path', id: 'provider', path: providerSource },
+        { kind: 'path', id: 'strategy', path: strategySource },
+        {
+          kind: 'git',
+          id: 'private-plugins',
+          url: 'https://github.invalid/nexuslbs/workbench-plugins-private',
+          ref: 'main',
+          auth: { type: 'github-app', credential: CREDENTIAL_NAME, appId: 3967918, installationId: 138119822 },
+        },
+      ],
+      plugins: {
+        'credentials-fixture': { values: { [CREDENTIAL_NAME]: CREDENTIAL_VALUE } },
+        'git-auth-fixture': { marker },
+      },
+    },
+    configDir: dir,
+    cacheDir: path.join(dir, 'sources'),
+    includeExternal: true,
+    log: (message) => lines.push(message),
+  })
+
+  // The STRATEGY plugin was loaded in the credentials phase: its handler RAN for
+  // the gated source, which is exactly what a phase-2 load could not do.
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ran')
+  // The source was therefore RESOLVED (it may still fail to clone - the remote
+  // does not exist - but never as a DEFERRAL).
+  assert.ok(!lines.some((line) => /private-plugins' is DEFERRED/.test(line)))
+  const source = kernel.sources.find((entry) => entry.id === 'private-plugins')
+  assert.ok(source !== undefined)
+  assert.ok(!/deferred/.test(source.error ?? ''))
+  // The credential VALUE never reaches a log line.
+  assert.ok(!lines.join('\n').includes(CREDENTIAL_VALUE))
+})

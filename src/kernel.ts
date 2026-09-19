@@ -94,9 +94,16 @@ export interface Kernel {
   dispose(): Promise<void>
 }
 
-/** True when a discovered plugin claims a credential provider id. */
-function declaresCredentialProvider(discovery: PluginDiscovery): boolean {
-  return discovery.capabilities.some((capability) => capability.id === CREDENTIALS && capability.provider !== undefined)
+/**
+ * True when a discovered plugin CONTRIBUTES to the credentials capability: a
+ * PROVIDER (a capability declaration carrying a provider id) or a GIT AUTH
+ * STRATEGY (a declaration without one, e.g. `credentials-github-app`, which
+ * mints from a value the providers resolved). Both are loaded BEFORE any
+ * credential-dependent source is resolved: a strategy plugin is useless if it
+ * arrives after the source that needs it.
+ */
+function contributesCredentials(discovery: PluginDiscovery): boolean {
+  return discovery.capabilities.some((capability) => capability.id === CREDENTIALS)
 }
 
 /**
@@ -350,12 +357,15 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     declare: declarePluginCapabilities,
   }
 
-  // Phase 1: the plugins that PROVIDE the credentials capability, from the
-  // sources that need no credential (the core ships no provider module).
+  // Phase 1: the plugins that CONTRIBUTE to the credentials capability - the
+  // PROVIDERS and the GIT AUTH STRATEGIES - from the sources that need no
+  // credential (the core ships no credentials module). A strategy plugin must be
+  // up here too: the gated source below needs its `auth.type` handler, and a
+  // handler registered in phase 2 would arrive after the source it serves.
   const providers = await loadPlugins(ctx, {
     ...loadOptions,
     config: { ...config, sources: openSources },
-    filter: (discovery) => declaresCredentialProvider(discovery),
+    filter: (discovery) => contributesCredentials(discovery),
   })
 
   // THE GATE: resolve the credential-dependent sources through the LIVE
@@ -415,9 +425,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const rest = await loadPlugins(ctx, {
     ...loadOptions,
     config: effective,
-    // A credentials-providing plugin was already applied in phase 1; applying it
-    // again would make its registration fail as a duplicate.
-    filter: (discovery) => !declaresCredentialProvider(discovery),
+    // A credentials CONTRIBUTOR (provider or git auth strategy) was already
+    // applied in phase 1; applying it again would make its registration fail as
+    // a duplicate.
+    filter: (discovery) => !contributesCredentials(discovery),
   })
 
   const plugins: LoadedPlugin[] = [...providers.plugins, ...rest.plugins]
