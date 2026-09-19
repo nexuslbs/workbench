@@ -218,6 +218,22 @@ export interface TotpConfig {
   providers?: string[]
 }
 
+/**
+ * The `sms` section of the workbench config: SMS PROVIDER SELECTION, the only
+ * thing that decides which sms provider answers. Adding/swapping/disabling a
+ * provider is a config edit, never a code change; the NUMBERS (label + phone
+ * number + credential reference) are the provider's own plugin configuration
+ * and never appear here.
+ */
+export interface SmsConfig {
+  /**
+   * Provider ids, in precedence order. Only the listed providers are ENABLED; a
+   * provider id that no plugin declares is a config error. Omit (or leave
+   * empty) to enable every declared provider in declaration order.
+   */
+  providers?: string[]
+}
+
 /** A plugin the loader could not load: reported, never fatal. */
 export interface LoadFailure {
   plugin: string
@@ -394,6 +410,8 @@ export interface WorkbenchConfig {
   email?: EmailConfig
   /** TOTP provider selection (see {@link TotpConfig}); absent enables every declared provider. */
   totp?: TotpConfig
+  /** SMS provider selection (see {@link SmsConfig}); absent enables every declared provider. */
+  sms?: SmsConfig
 }
 
 /**

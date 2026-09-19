@@ -63,6 +63,12 @@ export * from './email/definition.ts'
 // three-role seam as credentials, web and email:
 // Provider -> Definition <- Consumer, enforced by `npm run check:seam`.
 export * from './totp/definition.ts'
+// The SMS capability DEFINITION (`sms@1`): the contract an sms PROVIDER plugin
+// implements (numbers() as label/metadata only, list()/get() over NUMBER
+// REFERENCES, code() extraction) and a CONSUMER (the sms tools, a UI) calls as
+// `ctx.sms`. Same three-role seam as credentials, web, email and totp:
+// Provider -> Definition <- Consumer, enforced by `npm run check:seam`.
+export * from './sms/definition.ts'
 // The TOOLS capability: the definition (what a consumer plugin registers a named
 // tool with: name, description, parameter schema, handler) and the core HTTP
 // seam that exposes the registry by name (`POST /api/tools/<name>`).

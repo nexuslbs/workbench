@@ -528,6 +528,87 @@ definition/provider/consumer rules). A working external provider (RFC 4226/6238
 on `node:crypto`) plus consumer live in `nexuslbs/workbench-plugins`
 (`plugins/totp-rfc6238`, `plugins/totp-tools`).
 
+## 4g. SMS capability (`ctx.sms`)
+
+SMS is a capability of the same three-role shape as credentials (4b), web (4c),
+email (4e) and TOTP (4f): an operator configures phone numbers (one label per
+number, plus an optional default), and a consumer reads the inbox of a number by
+LABEL and extracts a verification code from it. The capability READS and extracts
+only: it never sends an SMS, never provisions a number and never runs a webhook.
+
+- **Definition** (core, `src/sms/definition.ts`, exported from `src/index.ts`):
+  the typed contract, the `sms@1` version and the typed `ctx.sms` handle
+  (`inject: ['sms']`). It names NO backend, NO API and NO credential format: a
+  number reference is a LABEL (an operator name such as `personal`), never a
+  phone number and never a secret. An external provider must be implementable
+  from the definition plus this document alone. The `code()` and `search()`
+  algorithms live on the definition (like 4e), so every backend gets them.
+- **Provider**: an implementation of the contract; its manifest declares the
+  provider id it answers for, which is what makes `ctx.sms.register()` legal and
+  what makes the provider SELECTABLE by configuration:
+
+  ```json
+  {
+    "name": "sms-twilio",
+    "entry": "index.ts",
+    "capabilities": [{ "id": "sms", "version": 1, "provider": "twilio" }]
+  }
+  ```
+
+  A provider implements `numbers()`, `list()` and `get()`; `code()` and
+  `search()` are optional (a backend that answers them natively overrides the
+  definition algorithms).
+- **Consumer**: uses `ctx.sms` alone, never a provider module. The plugins repo
+  ships `sms-tools`, which registers the tools `sms numbers`, `sms list`,
+  `sms get` and `sms code` through `ctx.workbench.registerTool` (4d), reachable
+  over HTTP like every other tool.
+
+| Member | Meaning |
+| --- | --- |
+| `ctx.sms.numbers()` | The configured numbers as METADATA ONLY: `{ label, number?, default?, configured? }`. The label is the reference every other method takes; `number` is the TO number of the inbox and a provider may omit it. No secret appears here. |
+| `ctx.sms.list(ref?, { limit?, since?, unreadOnly?, from? })` | The newest INBOUND messages of the number `ref` (the configured default number when omitted), newest first: `{ id, from, to, date, body, status?, unread? }[]`. `limit` defaults to 10 and is hard-capped at 100; a body is capped at 2000 characters and marked when cut. |
+| `ctx.sms.get(ref?, id)` | One message by its provider id (for Twilio: the message `Sid`), with its (capped) body and envelope. |
+| `ctx.sms.code(ref?, { id?, query?, pattern?, occurrences?, maxAgeSeconds? })` | The verification code: `{ code, body, from, date, messageId }`. Digits-first 4-8 digits, alphanumeric fallback; `pattern` overrides the shape (group 1, or the whole match); `occurrences` picks the Nth candidate; `id` short-circuits the scan to one message; `query` filters on sender or body; `maxAgeSeconds` bounds how old the message may be. |
+| `ctx.sms.search(ref?, query, { limit? })` | Messages whose sender or body contains `query` (a provider with native search answers better). |
+| `ctx.sms.providers()` / `enabled()` / `setEnabled(ids)` | The provider roster and selection, exactly as in 4b/4e/4f (`sms.providers` in the config fixes precedence; absent enables every declared provider). |
+
+Errors are structured, never fatal: an unknown label names the label and the
+configured ones (`SmsUnknownNumberError`), a label whose credential did not
+resolve is a `SmsNumberNotConfiguredError`, a missing message or code is a
+`SmsNotFoundError`, and calling any method with no provider at all is a
+`SmsNotConfiguredError`. Contract rule 6 applies: a provider whose credential is
+missing stays LOADED and is reported as not-configured (never under `failures`);
+only a call fails.
+
+The provider row (an external provider's own configuration, never the contract),
+one entry per number LABEL, each with its own credentials, so numbers MAY live in
+different accounts:
+
+```yaml
+plugins:
+  sms-twilio:
+    defaultNumber: personal
+    numbers:
+      personal:
+        number: "+15551234567"          # the TO number whose inbox is read
+        accountSid: ACxxxxxxxx           # not a secret; ${cred:NAME} also works
+        authToken: ${cred:TWILIO_PERSONAL_TOKEN}
+      work:
+        number: "+15557654321"
+        accountSid: ACyyyyyyyy
+        authToken: ${cred:TWILIO_WORK_TOKEN}
+```
+
+Secrets are referenced, not written: a provider row configures the plugin and is
+applied BEFORE the kernel's `${cred:NAME}` expansion, so a provider resolves a
+credential reference itself at CALL time through `ctx.credentials` - which is
+exactly why a missing credential leaves the plugin loaded with that number
+not-configured. Committing a real token is forbidden and no token crosses the
+contract. The capability is covered by `npm run check:seam` (`sms` joins the
+`credentials`/`email`/`totp` rules). A working external provider (Twilio REST,
+API version `2010-04-01`) plus consumer live in `nexuslbs/workbench-plugins`
+(`plugins/sms-twilio`, `plugins/sms-tools`).
+
 ## 5. How an external source is added
 
 The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /

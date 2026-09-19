@@ -7,6 +7,7 @@ import { CORE_PROVIDERS, registerCoreProviders } from './credentials/providers/i
 import { bootstrapCredentials } from './credentials/providers/bootstrap.ts'
 import { EMAIL, EMAIL_VERSION, Email, type EmailService } from './email/definition.ts'
 import { TOTP, TOTP_VERSION, Totp, type TotpService } from './totp/definition.ts'
+import { SMS, SMS_VERSION, Sms, type SmsService } from './sms/definition.ts'
 import { Host } from './host.ts'
 import { loadPlugins, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { resolveSourceAuths } from './source-auth.ts'
@@ -74,6 +75,13 @@ export interface Kernel {
    */
   totp: TotpService
   /**
+   * The SMS capability (`sms@1`): what consumers call (`numbers`, `list`,
+   * `get`, `code`, `search`) and what provider plugins register with
+   * (`register`). Also reachable as `ctx.sms` from any plugin
+   * (inject: ['sms']).
+   */
+  sms: SmsService
+  /**
    * The host (loader) API: the live plugin set and every mutation of it
    * (load/unload/reload/retry/enable/disable/install/uninstall). Also reachable
    * as `ctx.workbench.host()` from any plugin.
@@ -109,6 +117,11 @@ function declaresEmailProvider(discovery: PluginDiscovery): boolean {
 /** True when a discovered plugin claims a TOTP provider id (capability `totp`). */
 function declaresTotpProvider(discovery: PluginDiscovery): boolean {
   return discovery.capabilities.some((capability) => capability.id === TOTP && capability.provider !== undefined)
+}
+
+/** True when a discovered plugin claims an SMS provider id (capability `sms`). */
+function declaresSmsProvider(discovery: PluginDiscovery): boolean {
+  return discovery.capabilities.some((capability) => capability.id === SMS && capability.provider !== undefined)
 }
 
 /**
@@ -166,6 +179,14 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // selected by configuration.
   let totp!: TotpService
   await ctx.plugin({ name: TOTP, apply: (c) => { totp = new Totp(c) } })
+
+  // The SMS capability seam (the definition): same shape as email and totp. The
+  // service exists as soon as the kernel boots, so an sms provider plugin can
+  // register with it and a consumer plugin can call `ctx.sms`. It holds NO
+  // number, no credential and no transport - a provider is a plugin from any
+  // source, selected by configuration.
+  let sms!: SmsService
+  await ctx.plugin({ name: SMS, apply: (c) => { sms = new Sms(c) } })
 
   // The by-name TOOL INVOCATION surface: the registered tools belong to the
   // plugins, the routes are the core's contract for them. Registered here (the
@@ -249,6 +270,16 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
           source: discovery.source,
           external: discovery.external,
         })
+        continue
+      }
+      if (capability.id === SMS) {
+        sms.declare({
+          provider: capability.provider,
+          version: capability.version ?? SMS_VERSION,
+          plugin: discovery.name,
+          source: discovery.source,
+          external: discovery.external,
+        })
       }
     }
   }
@@ -319,12 +350,16 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const providers = await loadPlugins(ctx, {
     ...loadOptions,
     filter: (discovery) =>
-      declaresCredentialProvider(discovery) || declaresEmailProvider(discovery) || declaresTotpProvider(discovery),
+      declaresCredentialProvider(discovery) ||
+      declaresEmailProvider(discovery) ||
+      declaresTotpProvider(discovery) ||
+      declaresSmsProvider(discovery),
   })
   // Provider selection and precedence: CONFIGURATION only, never code.
   credentials.setEnabled(config.credentials?.providers)
   email.setEnabled(config.email?.providers)
   totp.setEnabled(config.totp?.providers)
+  sms.setEnabled(config.sms?.providers)
 
   // The config loader consumes the capability: `${cred:NAME}`.
   const expanded = (await expandCredentialRefsDeep(
@@ -341,7 +376,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     // A capability-providing plugin was already applied in phase 1; applying it
     // again would make its registration fail as a duplicate.
     filter: (discovery) =>
-      !declaresCredentialProvider(discovery) && !declaresEmailProvider(discovery) && !declaresTotpProvider(discovery),
+      !declaresCredentialProvider(discovery) &&
+      !declaresEmailProvider(discovery) &&
+      !declaresTotpProvider(discovery) &&
+      !declaresSmsProvider(discovery),
   })
 
   const plugins: LoadedPlugin[] = [...providers.plugins, ...rest.plugins]
@@ -373,6 +411,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     web,
     email,
     totp,
+    sms,
     host,
     configFile,
     get config(): WorkbenchConfig {
