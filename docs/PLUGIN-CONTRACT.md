@@ -447,6 +447,12 @@ provider may not import a consumer). A working external provider (himalaya mail
 CLI) plus consumer (the four tools) live in `nexuslbs/workbench-plugins`
 (`plugins/email-himalaya`, `plugins/email-tools`).
 
+The CLI is a CONSUMER of the capability, next to `ctx.workbench` and
+`ctx.credentials`: `workbench email providers` prints the declared / enabled /
+registered providers of `email@1` (`--json` for the raw payload) and
+`workbench email accounts` prints the configured account labels and addresses of
+the answering provider. Neither ever prints a credential: accounts carry a
+label, an address and a default flag, never a value.
 ## 5. How an external source is added
 
 The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /

@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
 import { CREDENTIALS_CONTRACT, parseCredentialRef, refLabel } from './credentials/definition.ts'
+import { EMAIL_CONTRACT } from './email/definition.ts'
 import { createKernel, type Kernel } from './kernel.ts'
 import { TOOLS_CONTRACT, ToolArgsError, ToolUnknownError } from './tools/definition.ts'
 import type { LoadedPlugin, PluginDiscoveryInfo } from './types.ts'
@@ -42,6 +43,9 @@ Usage:
                                   service (the VALUE is masked, never printed)
   workbench credentials explain <NAME[|SCOPE/NAME]>
                                   show which providers tried and which one answered
+  workbench email providers       list the email providers (enabled / registered)
+  workbench email accounts        list the configured mail accounts (label/address,
+                                  never a value) of the answering provider
 
 Options:
   --config <file>  config file to use; .json, .yml or .yaml (default: the first of
@@ -271,6 +275,56 @@ async function credentialsCommand(kernel: Kernel, flags: Flags): Promise<void> {
   }
 
   throw new Error(`unknown credentials subcommand '${sub}' (expected providers, list, resolve or explain)`)
+}
+
+/** `workbench email ...` - the non-config CONSUMER of the capability. */
+async function emailCommand(kernel: Kernel, flags: Flags): Promise<void> {
+  const [sub] = flags.rest.slice(1)
+  const email = kernel.ctx.email
+
+  if (sub === undefined || sub === 'providers') {
+    const providers = email.providers()
+    const enabled = email.enabled()
+    if (flags.json) {
+      process.stdout.write(JSON.stringify({ contract: EMAIL_CONTRACT, enabled, providers }, null, 2) + '\n')
+      return
+    }
+    const lines = [`email: ${providers.length} provider(s) declared, ${enabled.length} enabled (${EMAIL_CONTRACT})`]
+    for (const provider of providers) {
+      const state = `${provider.enabled ? 'enabled' : 'disabled'}${provider.registered ? '' : ', not-registered'}`
+      const origin = provider.external ? `external:${provider.source}` : provider.source
+      lines.push(
+        `  ${provider.id}  ${provider.contract}  [${state}]  declared by ${provider.plugin} (${origin})` +
+          `${provider.describe ? `  - ${provider.describe}` : ''}`,
+      )
+    }
+    lines.push(`selection order: ${enabled.length ? enabled.join(' -> ') : '(none)'}`)
+    process.stdout.write(lines.join('\n') + '\n')
+    return
+  }
+
+  if (sub === 'accounts') {
+    const accounts = await email.accounts()
+    if (flags.json) {
+      process.stdout.write(JSON.stringify({ contract: EMAIL_CONTRACT, enabled: email.enabled(), accounts }, null, 2) + '\n')
+      return
+    }
+    if (accounts.length === 0) {
+      process.stdout.write('email: no configured account (the enabled provider is registered but not configured)\n')
+      return
+    }
+    const lines = [`email: ${accounts.length} account(s) (${EMAIL_CONTRACT})`]
+    for (const account of accounts) {
+      lines.push(
+        `  ${account.label}${account.address ? `  ${account.address}` : ''}${account.default ? '  [default]' : ''}` +
+          `${account.description ? `  - ${account.description}` : ''}`,
+      )
+    }
+    process.stdout.write(lines.join('\n') + '\n')
+    return
+  }
+
+  throw new Error(`unknown email subcommand '${sub}' (expected providers or accounts)`)
 }
 
 /**
@@ -515,6 +569,11 @@ async function main(): Promise<void> {
 
     if (head === 'credentials') {
       await credentialsCommand(kernel, flags)
+      return
+    }
+
+    if (head === 'email') {
+      await emailCommand(kernel, flags)
       return
     }
 
