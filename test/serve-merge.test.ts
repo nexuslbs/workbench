@@ -14,7 +14,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { CORE_PLUGINS, ROOT } from './fixtures.ts'
+import { FIXTURE_PLUGINS, ROOT } from './fixtures.ts'
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -60,7 +60,7 @@ test('serve merges the Web UI and /health on one listener when the web port is t
       'sources:',
       '  - kind: path',
       '    id: core',
-      `    path: ${CORE_PLUGINS}`,
+      `    path: ${FIXTURE_PLUGINS}`,
       '    external: false',
       // ROSTER semantics: the config NAMES the plugins to load; a discovered
       // plugin without a row here is only available.

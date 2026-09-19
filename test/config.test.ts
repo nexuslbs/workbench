@@ -86,7 +86,7 @@ test('the repo default config is workbench.config.yml (core-only)', () => {
   assert.equal(resolveDefaultConfigFile(ROOT), DEFAULT_CONFIG)
   assert.equal(findDefaultConfigFile([ROOT]), DEFAULT_CONFIG)
   const loaded = readConfig(DEFAULT_CONFIG)
-  assert.deepEqual(loaded.config.sources.map((source) => [source.id, source.kind, source.external]), [['core', 'path', false]])
+  assert.deepEqual(loaded.config.sources, [], 'the core default config declares no source (the core ships ZERO plugins)')
 })
 
 test('a missing default config names every candidate file', () => {
@@ -136,13 +136,16 @@ test('non-string YAML scalars are reported by the validation messages', () => {
   assert.throws(() => readConfig(file), /'sources' must be an array \(got object\)/)
 })
 
-test('CLI (documented smoke) boots from the YAML example config', () => {
+test('CLI (documented smoke) boots the plugin-less YAML example config', () => {
   const listed = spawnSync(process.execPath, ['src/cli.ts', '--config', EXAMPLE_CONFIG, 'plugins'], { cwd: ROOT, encoding: 'utf8' })
   assert.equal(listed.status, 0, listed.stderr)
-  assert.match(listed.stdout, /workbench: 1 plugin\(s\) loaded \(1 core, 0 external\)/)
-  assert.match(listed.stdout, /hello-world@0\.1\.0\s+core/)
+  assert.match(listed.stdout, /workbench: 0 plugin\(s\) loaded \(0 core, 0 external\)/)
 
-  const hello = spawnSync(process.execPath, ['src/cli.ts', '--config', EXAMPLE_CONFIG, 'hello', 'world'], { cwd: ROOT, encoding: 'utf8' })
-  assert.equal(hello.status, 0, hello.stderr)
-  assert.equal(hello.stdout.trim(), 'Hello World')
+  // The example documents every shape a deployment needs - including the PRIVATE
+  // git source whose credential is a reference BY NAME, never a value.
+  const example = fs.readFileSync(EXAMPLE_CONFIG, 'utf8')
+  assert.match(example, /url: https:\/\/github\.com\/nexuslbs\/workbench-plugins-private/)
+  assert.match(example, /type: github-app/)
+  assert.match(example, /credential: GITHUB_APP_KEY/)
+  assert.doesNotMatch(example, /-----BEGIN|ghp_|sk-/)
 })

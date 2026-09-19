@@ -27,13 +27,14 @@ npm install
 npm test
 ```
 
-The core repo is self-contained: its default config (`workbench.config.yml`)
-declares the core plugins that ship with it and nothing else, so it boots with
-no plugin repository present.
+The core repo SHIPS ZERO PLUGINS (v0.0.2): its default config
+(`workbench.config.yml`) declares no plugin source and no roster row, so a fresh
+checkout boots with 0 plugins loaded and an EMPTY inventory. No plugin
+repository is required - and none is vendored: every plugin comes from an
+external source (`nexuslbs/workbench-plugins`).
 
 ```bash
-npm run dev -- plugins         # lists the loaded plugins and their sources
-npm run dev -- hello world     # -> Hello World (core plugin)
+npm run dev -- plugins         # empty inventory: 0 plugin(s) loaded
 npm run dev -- serve           # long-running service mode (see below)
 ```
 
@@ -41,34 +42,51 @@ Raw output of the documented smoke command:
 
 ```console
 $ npm run dev -- plugins
-workbench: 1 plugin(s) loaded (1 core, 0 external)
-source core (path, core): /path/to/workbench/plugins [1 plugin(s)]
-  hello-world@0.1.0  core  [command:hello world]
-
-$ npm run dev -- hello world
-Hello World
+workbench: 0 plugin(s) loaded (0 core, 0 external), 0 available (not on the plugins: roster), 0 disabled, 0 failed
 ```
 
-Load an EXTERNAL plugin repository by declaring it in your config (consumed as
-an external source, never vendored into this repo) - a sibling checkout
-(`kind: path`) or, in production, a git coordinate (`kind: git`):
+Load plugins by declaring an EXTERNAL source in your config (consumed as an
+external source, never vendored into this repo) - a sibling checkout
+(`kind: path`) or, in production, a git coordinate (`kind: git`) - and name the
+plugins you want in the `plugins:` roster:
 
 ```yaml
 sources:
   - kind: path
-    id: core
-    path: ./plugins
-    external: false
-  - kind: git
     id: workbench-plugins
-    url: https://github.com/nexuslbs/workbench-plugins
-    ref: main
-    subdir: plugins
+    path: ../workbench-plugins/plugins
+  # production shape:
+  # - kind: git
+  #   id: workbench-plugins
+  #   url: https://github.com/nexuslbs/workbench-plugins
+  #   ref: main
+  #   subdir: plugins
+
+plugins:
+  hello-world: { message: Hello World }   # the roster: only these are LOADED
 ```
 
 ```bash
 npm run dev -- --config /path/to/that/config.yml plugins
-CONFIG_FILE=/path/to/that/config.yml npm run dev -- plugins   # same thing
+npm run dev -- --config /path/to/that/config.yml hello world   # -> Hello World
+CONFIG_FILE=/path/to/that/config.yml npm run dev -- plugins     # same thing
+```
+
+A PRIVATE git source carries a credential REFERENCE BY NAME, never a value -
+resolved before any plugin loads (see [docs/CREDENTIALS.md](docs/CREDENTIALS.md)):
+
+```yaml
+sources:
+  - kind: git
+    id: workbench-plugins-private
+    url: https://github.com/nexuslbs/workbench-plugins-private
+    ref: main
+    subdir: plugins
+    auth:
+      type: github-app
+      credential: GITHUB_APP_KEY     # the value never appears in a file
+      appId: 3967918
+      installationId: 138119822
 ```
 
 Plugin loading messages go to stderr, command output to stdout.
@@ -83,9 +101,7 @@ container is `Up` because it hosts something, not because it sleeps.
 ```console
 $ npm run dev -- serve
 workbench: serving on http://0.0.0.0:12347 config=/path/to/workbench.config.yml
-workbench: 1 plugin(s) loaded (1 core, 0 external)
-source core (path, core): /path/to/workbench/plugins [1 plugin(s)]
-  hello-world@0.1.0  core  [command:hello world]
+workbench: 0 plugin(s) loaded (0 core, 0 external), 0 available (not on the plugins: roster), 0 disabled, 0 failed
 ```
 
 Environment (all optional):
@@ -176,7 +192,7 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:12348/api/to
 | `--config <file>` | Use another config file; `.json`, `.yml` or `.yaml` (the extension selects the parser). |
 | `--port <n>` | `serve` only: status endpoint port (overrides `WORKBENCH_PORT`). |
 | `--web-port <n>` | `serve` only: Web UI port when the config enables the UI; set it to the status port to serve the UI and `/health` on ONE listener. |
-| `--no-external` | Skip external sources (only the core plugins load). |
+| `--no-external` | Skip external sources (with the shipped default config nothing loads at all). |
 | `--help` | Usage. |
 
 With npm: `npm run dev -- <args>`.
@@ -190,26 +206,25 @@ error, the core never guesses). Without `--config` the core looks for, in order,
 working directory and then next to the core; the first existing file wins and a
 missing config names all three candidates.
 
-YAML, with comments - this is the shipped default: core-only, with the external
-source as a commented EXAMPLE (the core never depends on a plugin repository):
+YAML, with comments - this is the shipped default: NO plugin at all, with the
+external sources as commented EXAMPLES (the core never depends on a plugin
+repository):
 
 ```yaml
 # workbench.config.yml
-sources:
-  # core plugins that ship with this repository
-  - kind: path
-    id: core
-    path: ./plugins
-    external: false
-  # EXAMPLE - an external repository of plugins:
-  # - kind: git
-  #   id: workbench-plugins
-  #   url: https://github.com/nexuslbs/workbench-plugins
-  #   ref: main
-  #   subdir: plugins
+sources: []
 
-plugins:
-  hello-world: { message: Hello World }
+# EXAMPLE - external repositories of plugins:
+# - kind: path
+#   id: workbench-plugins
+#   path: ../workbench-plugins/plugins
+# - kind: git
+#   id: workbench-plugins
+#   url: https://github.com/nexuslbs/workbench-plugins
+#   ref: main
+#   subdir: plugins
+
+plugins: {}
 ```
 
 The same schema in JSON (JSON has no comments, so an external source is a real
@@ -217,7 +232,7 @@ entry there):
 
 ```json
 {
-  "sources": [{ "kind": "path", "id": "core", "path": "./plugins", "external": false }],
+  "sources": [{ "kind": "path", "id": "workbench-plugins", "path": "../workbench-plugins/plugins" }],
   "plugins": { "hello-world": { "message": "Hello World" } }
 }
 ```

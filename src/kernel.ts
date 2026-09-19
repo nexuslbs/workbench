@@ -194,6 +194,53 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // seam; the dispatch reads the live registry, so it follows load/unload.
   registerToolRoutes(web, registry)
 
+  // The LOADER's own observation surface, registered by the composition root on
+  // the web seam: the plugin-less core still ANSWERS (its status and its
+  // inventory) instead of 404ing. No product feature: it reports the loader
+  // state only; every page, asset, route and UI comes from a plugin.
+  const statusPayload = (): string =>
+    JSON.stringify(
+      {
+        status: 'ok',
+        configFile,
+        plugins: host.inventory().plugins,
+        sources: host.inventory().sources,
+        failures: host.inventory().failures,
+      },
+      null,
+      2,
+    )
+  const statusHandler: WebHandler = (request) => {
+    if (request.method !== 'GET' && request.method !== 'HEAD') return undefined
+    if (request.path !== '/health' && request.path !== '/healthz') return undefined
+    return { contentType: 'application/json; charset=utf-8', body: statusPayload() + '\n' }
+  }
+  web.route({ method: 'GET', path: '/health', handler: statusHandler, description: 'the loader status (core)' })
+  web.route({ method: 'HEAD', path: '/health', handler: statusHandler, description: 'the loader status (core)' })
+  web.route({
+    method: 'GET',
+    path: '/api/plugins',
+    description: 'the loader inventory (core): an EMPTY list is a valid answer',
+    handler: (request) => {
+      if (request.method !== 'GET') return undefined
+      const inventory = host.inventory()
+      return {
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify(
+          {
+            plugins: inventory.plugins,
+            discovered: inventory.discovered,
+            available: inventory.available,
+            failures: inventory.failures,
+            sources: inventory.sources,
+          },
+          null,
+          2,
+        ) + '\n',
+      }
+    },
+  })
+
   // The credentials service: the definition's default implementation plus the
   // DECLARATIONS of the core providers (they are core modules, not plugins of a
   // source, so the kernel declares them; their registrations follow).

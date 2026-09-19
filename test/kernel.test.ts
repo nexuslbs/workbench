@@ -1,14 +1,15 @@
 // End-to-end tests of the load-and-run path:
-//  - the DEFAULT config is core-only and boots without any external source,
-//  - the core plugin AND an external plugin (a temp fixture source) are
+//  - the DEFAULT config ships ZERO plugins and boots an EMPTY kernel,
+//  - a local fixture source AND an external fixture source (both temp dirs) are
 //    discovered and loaded through the same plugin-source mechanism,
 //  - both register their command and both greetings come out,
 //  - the CLI (the documented smoke command) produces the same result,
 //  - the external command is absent when external sources are skipped,
 //  - `serve` is a real long-running entrypoint (it answers /health and stays up).
 //
-// The external plugin is a fixture in a temp dir: the core repo has no
-// dependency on any plugins repository.
+// Every plugin used here is a FIXTURE created in a temp dir (see
+// `test/fixtures.ts`): the core repo ships no plugin at all and depends on no
+// plugins repository.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -19,19 +20,38 @@ import { DEFAULT_CONFIG, ROOT, externalFixture } from './fixtures.ts'
 
 const quiet = (): void => undefined
 
-test('the default config is core-only and boots without external sources', async () => {
+test('the default config ships ZERO plugins and still boots an empty kernel', async () => {
   const kernel = await createKernel({ configFile: DEFAULT_CONFIG, log: quiet })
   try {
-    assert.deepEqual(kernel.plugins.map((plugin) => plugin.name), ['hello-world'])
-    assert.deepEqual(kernel.sources.map((source) => [source.id, source.external]), [['core', false]])
-    assert.equal(kernel.registry.resolve(['hello', 'otherworld']), undefined)
-    assert.equal(await kernel.registry.resolve(['hello', 'world'])?.command.run([]), 'Hello World')
+    assert.deepEqual(kernel.plugins, [], 'the core ships no plugin, so none can be loaded')
+    assert.deepEqual(kernel.sources, [], 'the default config declares no source')
+    assert.deepEqual(kernel.registry.commands(), [], 'no plugin registered a command')
+    assert.equal(kernel.registry.resolve(['hello', 'world']), undefined)
+
+    const inventory = kernel.host.inventory()
+    assert.deepEqual(inventory.discovered, [])
+    assert.deepEqual(inventory.available, [])
+    assert.deepEqual(inventory.failures, [])
+
+    // The plugin-less core still SERVES: the inventory answers an EMPTY list,
+    // not an error (negative control of the "zero core plugins" requirement).
+    const server = await kernel.startWeb({ host: '127.0.0.1', port: 0 })
+    try {
+      const response = await fetch(`${server.url}/health`)
+      assert.equal(response.status, 200)
+      const status = (await response.json()) as { status?: string; plugins?: unknown[]; sources?: unknown[] }
+      assert.equal(status.status, 'ok')
+      assert.deepEqual(status.plugins, [])
+      assert.deepEqual(status.sources, [])
+    } finally {
+      await server.close()
+    }
   } finally {
     await kernel.dispose()
   }
 })
 
-test('loads the core plugin and an external fixture plugin, and runs both greetings', async () => {
+test('loads the local fixture source and an external fixture plugin, and runs both greetings', async () => {
   const fixture = externalFixture()
   const kernel = await createKernel({ configFile: fixture.yml, log: quiet })
   try {
@@ -83,15 +103,15 @@ test('CLI (documented smoke): hello otherworld comes from the external plugin', 
   }
 })
 
-test('CLI: the default config boots core-only (no plugins repository required)', () => {
+test('CLI: the default config boots with ZERO plugins (no plugins repository required)', () => {
   const listed = spawnSync(process.execPath, ['src/cli.ts', 'plugins'], { cwd: ROOT, encoding: 'utf8' })
   assert.equal(listed.status, 0, listed.stderr)
-  assert.match(listed.stdout, /workbench: 1 plugin\(s\) loaded \(1 core, 0 external\)/)
-  assert.match(listed.stdout, /hello-world@0\.1\.0\s+core/)
+  assert.match(listed.stdout, /workbench: 0 plugin\(s\) loaded \(0 core, 0 external\)/)
+  assert.doesNotMatch(listed.stdout, /hello-world/, 'the core ships no plugin to list')
 
   const hello = spawnSync(process.execPath, ['src/cli.ts', 'hello', 'world'], { cwd: ROOT, encoding: 'utf8' })
-  assert.equal(hello.status, 0, hello.stderr)
-  assert.equal(hello.stdout.trim(), 'Hello World')
+  assert.notEqual(hello.status, 0, 'no plugin registers a command, so nothing can run it')
+  assert.doesNotMatch(hello.stdout, /Hello World/)
 })
 
 test('CLI: CONFIG_FILE selects the config file, an empty value keeps the default', () => {
@@ -111,7 +131,7 @@ test('CLI: CONFIG_FILE selects the config file, an empty value keeps the default
       env: { ...process.env, CONFIG_FILE: '' },
     })
     assert.equal(empty.status, 0, empty.stderr)
-    assert.match(empty.stdout, /workbench: 1 plugin\(s\) loaded \(1 core, 0 external\)/)
+    assert.match(empty.stdout, /workbench: 0 plugin\(s\) loaded \(0 core, 0 external\)/)
 
     const missing = spawnSync(process.execPath, ['src/cli.ts', 'plugins'], {
       cwd: ROOT,

@@ -16,7 +16,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { createKernel } from '../src/kernel.ts'
 import { readConfig } from '../src/config.ts'
-import { CORE_PLUGINS, externalFixture } from './fixtures.ts'
+import { FIXTURE_PLUGINS, externalFixture } from './fixtures.ts'
 
 const quiet = (): void => undefined
 
@@ -29,7 +29,7 @@ function rosterConfig(fixtureDir: string, name: string, roster: string[]): strin
       'sources:',
       '  - kind: path',
       '    id: core',
-      `    path: ${JSON.stringify(CORE_PLUGINS)}`,
+      `    path: ${JSON.stringify(FIXTURE_PLUGINS)}`,
       '    external: false',
       '  - kind: path',
       '    id: external-plugins',

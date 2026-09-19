@@ -20,7 +20,7 @@ import {
 } from '../src/credentials/definition.ts'
 import { expandCredentialRefs, expandCredentialRefsDeep, expandEnvDeep } from '../src/config.ts'
 import type { CredentialsConfig, WorkbenchConfig } from '../src/types.ts'
-import { CORE_PLUGINS } from './fixtures.ts'
+import { FIXTURE_PLUGINS } from './fixtures.ts'
 import { mockProvider } from './mock-provider.ts'
 
 const quiet = (): void => undefined
@@ -435,7 +435,7 @@ test('end to end: a plugin config value with ${cred:NAME} is expanded during a r
       'sources:',
       '  - kind: path',
       '    id: core',
-      `    path: ${JSON.stringify(CORE_PLUGINS)}`,
+      `    path: ${JSON.stringify(FIXTURE_PLUGINS)}`,
       '    external: false',
       '',
       'credentials:',

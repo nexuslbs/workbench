@@ -1,18 +1,23 @@
 # workbench core - default config.
 #
-# It lists the CORE plugins that ship with this repository and nothing else: the
-# core has NO dependency on any plugin repository and boots fine with external
-# sources absent. Relative `path` sources resolve against this file's directory.
-sources:
-  # core plugins that ship with this repository
-  - kind: path
-    id: core
-    path: ./plugins
-    external: false
+# The core repository SHIPS ZERO PLUGINS (v0.0.2): this file declares no plugin
+# source and no roster row, so a fresh checkout boots with 0 plugins loaded and
+# an EMPTY inventory. Every plugin comes from an EXTERNAL source - see the
+# commented examples below and `workbench.config.example.yml`; the plugins
+# repository is `nexuslbs/workbench-plugins`.
+#
+# `sources:` = where plugins are DISCOVERED (what is AVAILABLE). Relative `path`
+# sources resolve against this file's directory.
+sources: []
 
-# EXAMPLE - how an EXTERNAL repository of plugins is declared (commented out on
-# purpose: the core never depends on the plugins repository - uncomment and
-# adapt to actually load one):
+# EXAMPLE - how an external repository of plugins is declared (commented out on
+# purpose: the core never depends on a plugin repository - uncomment and adapt
+# to actually load one):
+#
+#  # local source - handy during development (a sibling checkout, no network)
+#  - kind: path
+#    id: workbench-plugins
+#    path: ../workbench-plugins/plugins
 #
 #  # remote (git) source - the production form: cloned once, then cached
 #  - kind: git
@@ -21,17 +26,26 @@ sources:
 #    ref: main
 #    subdir: plugins
 #
-#  # local source - handy during development (a sibling checkout, no network)
-#  - kind: path
-#    id: workbench-plugins
-#    path: ../workbench-plugins/plugins
+#  # PRIVATE git source: the credential is a REFERENCE BY NAME, never a value
+#  # (see docs/CREDENTIALS.md, "Private plugin sources")
+#  - kind: git
+#    id: workbench-plugins-private
+#    url: https://github.com/nexuslbs/workbench-plugins-private
+#    ref: main
+#    subdir: plugins
+#    auth:
+#      type: github-app
+#      credential: GITHUB_APP_KEY
+#      appId: 3967918
+#      installationId: 138119822
 
 # `plugins:` is the ROSTER (the enable list): only the plugins named here are
 # loaded. A plugin discovered in `sources:` with no row here is AVAILABLE - the
 # inventory lists it, the loader never imports it, and one `enable`
 # (workbench plugins->Plugin Inventory page, or the host API) persists its row.
-# `disabled: true` inside a row parks that plugin (configured, deliberately off).
-plugins:
-  # per-plugin config, keyed by plugin name (the row is also the selection)
-  hello-world:
-    message: Hello World
+# Empty: nothing is loaded, not even a discovered plugin.
+# EXAMPLE:
+# plugins:
+#   hello-world:
+#     message: Hello World
+plugins: {}

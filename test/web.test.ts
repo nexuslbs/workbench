@@ -10,7 +10,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { Context } from 'cordis'
-import { CORE_PLUGINS } from './fixtures.ts'
+import { FIXTURE_PLUGINS } from './fixtures.ts'
 import { createKernel } from '../src/kernel.ts'
 import { DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, WEB, Web, type WebPageInfo } from '../src/web/definition.ts'
 import { renderShell } from '../src/web/providers/shell.ts'
@@ -150,8 +150,8 @@ test('the core provider serves the shell, the page index, assets and routes over
 
 test('the kernel serves the empty shell when no UI plugin is configured', async () => {
   const kernel = await createKernel({
-    config: { sources: [{ kind: 'path', id: 'core', path: CORE_PLUGINS, external: false }], plugins: { 'hello-world': {} } },
-    configDir: path.dirname(CORE_PLUGINS),
+    config: { sources: [{ kind: 'path', id: 'core', path: FIXTURE_PLUGINS, external: false }], plugins: { 'hello-world': {} } },
+    configDir: path.dirname(FIXTURE_PLUGINS),
     log: () => {},
   })
   try {

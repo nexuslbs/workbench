@@ -17,7 +17,7 @@ import test from 'node:test'
 import { createKernel } from '../src/kernel.ts'
 import { resolveSource } from '../src/sources.ts'
 import type { SourceSpec } from '../src/types.ts'
-import { CORE_PLUGINS } from './fixtures.ts'
+import { FIXTURE_PLUGINS } from './fixtures.ts'
 
 const quiet = (): void => undefined
 
@@ -130,7 +130,7 @@ test('a git source is cloned on first use, scanned through subdir, and the fetch
       'sources:',
       '  - kind: path',
       '    id: core',
-      `    path: ${JSON.stringify(CORE_PLUGINS)}`,
+      `    path: ${JSON.stringify(FIXTURE_PLUGINS)}`,
       '    external: false',
       '  - kind: git',
       '    id: git-demo-source',

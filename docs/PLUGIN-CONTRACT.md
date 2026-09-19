@@ -1,7 +1,8 @@
 # workbench plugin contract
 
-This is the contract every workbench plugin follows, core plugins and external
-plugins alike (the core loads both through the same mechanism). It is
+This is the contract every workbench plugin follows. The core repository ships
+NO plugin: every plugin is EXTERNAL and the core loads them all through the
+same mechanism (a plugin source). It is
 intentionally small: the core hosts plugins, it does not know anything about
 what they do.
 
@@ -621,7 +622,7 @@ The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /
 ```json
 {
   "sources": [
-    { "kind": "path", "id": "core", "path": "./plugins", "external": false },
+    { "kind": "path", "id": "workbench-plugins", "path": "../workbench-plugins/plugins" },
     { "kind": "path", "id": "external-plugins", "path": "../example-plugins/plugins" },
     { "kind": "git", "id": "external-plugins-git", "url": "https://github.com/example/example-plugins.git", "ref": "main", "subdir": "plugins" }
   ],

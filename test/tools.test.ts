@@ -13,7 +13,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { Context } from 'cordis'
-import { CORE_PLUGINS } from './fixtures.ts'
+import { FIXTURE_PLUGINS } from './fixtures.ts'
 import { createKernel } from '../src/kernel.ts'
 import { CommandRegistry } from '../src/registry.ts'
 import {
@@ -87,7 +87,7 @@ function toolFixture(): ToolFixture {
     'sources:',
     '  - kind: path',
     '    id: core',
-    `    path: ${JSON.stringify(CORE_PLUGINS)}`,
+    `    path: ${JSON.stringify(FIXTURE_PLUGINS)}`,
     '    external: false',
     '  - kind: path',
     '    id: tools-fixture',
@@ -283,7 +283,7 @@ test('a plugin that registers tools owns them, and unloading it disposes them (l
   const kernel = await createKernel({
     config: {
       sources: [
-        { kind: 'path', id: 'core', path: CORE_PLUGINS, external: false },
+        { kind: 'path', id: 'core', path: FIXTURE_PLUGINS, external: false },
         { kind: 'path', id: 'tools-fixture', path: '.' },
       ],
       plugins: { 'hello-tool': {} },

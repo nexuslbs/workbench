@@ -6,41 +6,61 @@
 # expansion. Without --config the core looks for workbench.config.yml, then
 # workbench.config.yaml, then workbench.config.json in the working directory.
 #
-# This file is core-only, like the default config: an external plugin source is
-# an EXAMPLE below, commented out - the core repo does not depend on any plugin
-# repository.
-sources:
-  # core plugins that ship with this repository
-  - kind: path
-    id: core
-    path: ./plugins
-    external: false
-  # EXAMPLE - an external repository of plugins (the production form is a git
-  # source; a sibling path works the same way with no network):
+# This file is plugin-less like the default config: the core ships NO plugins,
+# so every source below is an EXAMPLE, commented out. Uncomment ONE and name the
+# plugins you want in the `plugins:` roster.
+sources: []
+  # 1. LOCAL source: a sibling checkout of the plugins repository, no network.
+  # - kind: path
+  #   id: workbench-plugins
+  #   path: ../workbench-plugins/plugins
+
+  # 2. PUBLIC git source: the production shape. The repository is cloned once
+  #    into WORKBENCH_CACHE_DIR (/var/lib/workbench/sources in the service image)
+  #    and `subdir` selects the plugin directory inside the checkout.
   # - kind: git
   #   id: workbench-plugins
   #   url: https://github.com/nexuslbs/workbench-plugins
   #   ref: main
   #   subdir: plugins
 
+  # 3. PRIVATE git source WITH CREDENTIALS: `auth.credential` is a credential
+  #    REFERENCE BY NAME, never a value. It is resolved by the BOOTSTRAP
+  #    credential set (core providers, no plugin) BEFORE any plugin loads, so a
+  #    private source is fetchable at boot. See docs/CREDENTIALS.md
+  #    ("Private plugin sources: source auth + the BOOTSTRAP credential set").
+  # - kind: git
+  #   id: workbench-plugins-private
+  #   url: https://github.com/nexuslbs/workbench-plugins-private
+  #   ref: main                      # branch, tag or sha
+  #   subdir: plugins                # optional
+  #   auth:
+  #     type: github-app             # or `token` (default)
+  #     credential: GITHUB_APP_KEY   # a NAME; the value never appears in a file
+  #     appId: 3967918               # github-app: the App id (not a secret)
+  #     installationId: 138119822    # github-app: the installation (not a secret)
+  #     # apiBase: https://api.github.com   # GitHub Enterprise
+  #     # username: x-access-token         # token: basic-auth user
+
 # `plugins:` is the ROSTER: only the plugins named here are LOADED. A plugin
 # discovered in `sources:` without a row is merely AVAILABLE - listed by
 # `workbench plugins` / the Plugin Inventory page and loadable with one `enable`
 # (which persists the row). A row with `disabled: true` PARKS a plugin
 # (configured, deliberately off).
-plugins:
-  # YAML scalars must stay strings here: quote values like "yes", "on", "42",
-  # "1.0" and anything starting with a YAML indicator character (* & ! % @ ` etc).
-  hello-world:
-    message: Hello World
+# YAML scalars must stay strings here: quote values like "yes", "on", "42",
+# "1.0" and anything starting with a YAML indicator character (* & ! % @ ` etc).
+# EXAMPLE:
+# plugins:
+#   hello-world:
+#     message: Hello World
+plugins: {}
 
 # Web UI (composed by UI plugins through the ctx.web seam; the core only serves
 # bytes and routes). `workbench web` starts the listener; `workbench serve`
 # starts the same listener in the service process when `enabled` is true.
 # Absent or `enabled: false` keeps the historical behaviour exactly.
-web:
-  enabled: true
-  # loopback by default: the UI has no auth this round. Binding 0.0.0.0 exposes
-  # it to every machine that can reach this port.
-  host: 127.0.0.1
-  port: 12348
+# (UI plugins come from an external source like every other plugin.)
+# web:
+#   enabled: true
+#   host: 127.0.0.1
+#   port: 12348

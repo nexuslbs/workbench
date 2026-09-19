@@ -49,10 +49,11 @@ run-time input, the image is created ONCE and never changes:
 - credentials in it are references **by name** only (`${cred:NAME}`, `${env:VAR}`),
   never a value.
 
-`deploy/ci/deployment.config.yml` is the config the CI validation uses: the core
-plugins from the image plus the **external** `nexuslbs/workbench-plugins`
-repository as a `git` source, and the Web UI enabled so the live add/remove
-checks can drive the plugin-manager seam.
+`deploy/ci/deployment.config.yml` is the config the CI validation uses: NO core
+plugin source (the image is a core checkout and the core ships ZERO plugins)
+plus the **external** `nexuslbs/workbench-plugins` repository as a `git` source,
+and the Web UI enabled so the live add/remove checks can drive the
+plugin-manager seam.
 
 ## Publishing (GitHub Actions, `.github/workflows/publish.yml`)
 
@@ -72,7 +73,8 @@ Jobs, in order:
    `latest` for `stable`, `X.Y.Z` + `latest` for a `v*` tag. No other tag is
    ever produced.
 2. **Validate created image (run-time config)** - a SEPARATE job that loads that
-   very artifact, checks the deployment config is **not** inside the image, then
+   very artifact, checks the deployment config is **not** inside the image (and
+   that the image ships no `plugins/` tree), then
    starts an ephemeral container with `CONFIG_FILE` + the config mounted,
    waits for `/health`, runs the CLI, loads an external plugin from the
    `workbench-plugins` clone, and finally changes the plugin set live (install a

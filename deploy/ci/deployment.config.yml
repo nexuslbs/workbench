@@ -20,12 +20,10 @@
 # Credentials (if a deployment needs them) are references BY NAME only, e.g.
 # `${cred:github-app}` or `${env:GITHUB_TOKEN}`; never a value.
 sources:
-  # The core plugins shipped INSIDE the image: an image is a core checkout, no
-  # plugin repository is vendored into it.
-  - kind: path
-    id: core
-    path: /workbench/plugins
-    external: false
+  # NO core plugin source: the image IS a core checkout and the core SHIPS ZERO
+  # PLUGINS (v0.0.2) - there is no /workbench/plugins directory to point at, and
+  # no plugin repository is vendored into the image.
+  #
   # An EXTERNAL plugin repository, the production shape: the core clones it into
   # WORKBENCH_CACHE_DIR (/var/cache/workbench, writable in the image) and scans
   # the `plugins` subtree.
@@ -36,8 +34,9 @@ sources:
     subdir: plugins
 
 plugins:
-  # Per-plugin config of THIS deployment. The core test plugin prints this
-  # message, which is how the CI proves the run-time config is honoured.
+  # Per-plugin config of THIS deployment. The EXTERNAL `hello-world` plugin (from
+  # the git source above) prints this message, which is how the CI proves the
+  # run-time config is honoured - and that an external source is loaded.
   hello-world:
     message: hello from the deployment config
 

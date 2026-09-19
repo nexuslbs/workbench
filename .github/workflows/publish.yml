@@ -154,6 +154,11 @@ jobs:
             exit 1
           fi
           echo "OK: the deployment config content is inside the image? NO"
+          if docker run --rm "$IMG" sh -c "test -e /workbench/plugins"; then
+            echo "::error::the image ships a /workbench/plugins tree; the core must ship ZERO plugins"
+            exit 1
+          fi
+          echo "OK: the image ships no plugins/ tree (the core ships zero plugins)"
 
       - name: Run the created image with the deployment config (run-time input)
         id: run
@@ -180,11 +185,13 @@ jobs:
           cat /tmp/health.json
           echo
 
-          echo "== CLI: plugins =="
-          docker exec wb-test node src/cli.ts plugins
+          echo "== CLI: plugins (no core plugin: every plugin comes from an external source) =="
+          docker exec wb-test node src/cli.ts plugins | tee /tmp/plugins.txt
+          grep -q 'hello-world@0.1.0  external:workbench-plugins' /tmp/plugins.txt
+          echo "OK: hello-world is loaded from the EXTERNAL git source"
           echo "== CLI: commands =="
           docker exec wb-test node src/cli.ts commands
-          echo "== the deployment config is honoured: core plugin message comes from the config =="
+          echo "== the deployment config is honoured: the message comes from the external hello-world plugin =="
           docker exec wb-test node src/cli.ts hello world
           echo "== an EXTERNAL plugin from the git source (cloned by the core at boot) answers =="
           docker exec wb-test node src/cli.ts hello otherworld
