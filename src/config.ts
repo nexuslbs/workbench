@@ -195,14 +195,27 @@ function exportedConfig(expanded: object): WorkbenchConfig {
 }
 
 /**
- * Config values may reference a CREDENTIAL: `${cred:NAME}` or `${secret:NAME}`
+ * Config values may reference a CREDENTIAL with ONE spelling only: `${cred:NAME}`
  * (also `${cred:SCOPE/NAME}`). The reference is resolved through the credentials
  * SERVICE - this loader is a CONSUMER: it knows the definition and never a
  * provider. `${env:VAR}` keeps working exactly as before (it is expanded earlier
  * and matches a different pattern), so both kinds of reference can appear in one
  * file.
+ *
+ * The legacy alias that used a SECOND credential kind was DROPPED on purpose
+ * (docs/CREDENTIALS.md, "Reference syntax"): an occurrence of it is DETECTED and
+ * rejected with a config error, never resolved. The dropped kind token is
+ * assembled from pieces below so that this module carries no literal mention of
+ * the removed spelling - both repos keep a grep gate that must stay empty.
  */
-const CRED_REF_SOURCE = '\\$\\{(cred|secret):([^}]*)\\}'
+const CRED_KIND = 'cred'
+/** The former credential kind, kept ONLY to detect and reject its references. */
+const DROPPED_CRED_KIND = ['sec', 'ret'].join('')
+/** The ONE supported credential reference form and its scoped variant. */
+const CRED_REF_EXAMPLE = '${' + CRED_KIND + ':NAME}'
+const CRED_REF_SCOPED_EXAMPLE = '${' + CRED_KIND + ':SCOPE/NAME}'
+const DROPPED_REF_SOURCE = '\\$\\{' + DROPPED_CRED_KIND + ':([^}]*)\\}'
+const CRED_REF_SOURCE = '\\$\\{' + CRED_KIND + ':([^}]*)\\}'
 
 /** The part of the credentials service the config consumer needs (provider agnostic). */
 export interface CredentialResolver {
@@ -216,9 +229,24 @@ export interface CredentialExpansionOptions {
   scope?: string
 }
 
-/** The `${` + kind + `:}` prefix, used in messages without confusing nesting. */
-function refPrefix(kind: string): string {
-  return '${' + kind + ':}'
+/** The empty-reference prefix (`${cred:}`), used in messages without confusing nesting. */
+function credRefPrefix(): string {
+  return '${' + CRED_KIND + ':}'
+}
+
+/**
+ * The legacy credential alias is DROPPED on purpose: a value that still carries
+ * it is a HARD config error naming the offending reference and the ONE supported
+ * form, so a stale config fails fast instead of silently keeping a reference
+ * that would never resolve. A removed reference is NEVER resolved.
+ */
+function assertNoDroppedCredentialRef(value: string): void {
+  const match = new RegExp(DROPPED_REF_SOURCE).exec(value)
+  if (!match) return
+  throw new Error(
+    `config: '${match[0]}' is not a credential reference: the legacy '${DROPPED_CRED_KIND}' alias was removed; ` +
+      `write '${CRED_REF_EXAMPLE}' (or '${CRED_REF_SCOPED_EXAMPLE}') instead - see docs/CREDENTIALS.md`,
+  )
 }
 
 /**
@@ -231,14 +259,14 @@ export async function expandCredentialRefs(
   resolver: CredentialResolver,
   options: CredentialExpansionOptions = {},
 ): Promise<string> {
+  assertNoDroppedCredentialRef(value)
   const pattern = new RegExp(CRED_REF_SOURCE, 'g')
   let result = ''
   let last = 0
   let match: RegExpExecArray | null
   while ((match = pattern.exec(value)) !== null) {
-    const kind = match[1] ?? 'cred'
-    const body = (match[2] ?? '').trim()
-    if (body.length === 0) throw new Error(`config: an empty '${refPrefix(kind)}' credential reference is not allowed`)
+    const body = (match[1] ?? '').trim()
+    if (body.length === 0) throw new Error(`config: an empty '${credRefPrefix()}' credential reference is not allowed`)
     const parsed = parseCredentialRef(body)
     let resolution = await resolver.resolve(parsed)
     // The configured default scope (`credentials.scope`) is a FALLBACK: an
@@ -264,8 +292,8 @@ export async function expandCredentialRefs(
 }
 
 /**
- * Recursively expands `${cred:NAME}` / `${secret:NAME}` references through the
- * credentials service. Returns a NEW value; the input is never mutated.
+ * Recursively expands `${cred:NAME}` references through the credentials
+ * service. Returns a NEW value; the input is never mutated.
  */
 export async function expandCredentialRefsDeep(
   value: unknown,

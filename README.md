@@ -224,7 +224,7 @@ credentials:
 
 plugins:
   hello-world:
-    message: "token is ${cred:DEPLOY_TOKEN}"   # or ${secret:DEPLOY_TOKEN}
+    message: "token is ${cred:DEPLOY_TOKEN}"
 ```
 
 A reference may also carry a scope (`${cred:SCOPE/NAME}`); `credentials.scope`

@@ -241,7 +241,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // Provider selection and precedence: CONFIGURATION only, never code.
   credentials.setEnabled(config.credentials?.providers)
 
-  // The config loader consumes the capability: `${cred:NAME}` / `${secret:NAME}`.
+  // The config loader consumes the capability: `${cred:NAME}`.
   const expanded = (await expandCredentialRefsDeep(
     { sources: config.sources, plugins: config.plugins ?? {} },
     resolver,

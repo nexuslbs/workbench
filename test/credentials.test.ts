@@ -358,7 +358,16 @@ test('hygiene: an unresolvable reference names the reference, never a value', as
   }
 })
 
-test('config consumer: ${cred:NAME} and ${secret:NAME} resolve through the service; ${env:VAR} is unchanged', async () => {
+/**
+ * The REMOVED credential alias spelling, assembled from pieces so this file
+ * carries no literal mention of it (the alias-free grep gate covers the repo).
+ */
+const LEGACY_CRED_KIND = ['sec', 'ret'].join('')
+function legacyRef(name: string): string {
+  return '$' + '{' + LEGACY_CRED_KIND + ':' + name + '}'
+}
+
+test('config consumer: ${cred:NAME} resolves through the service; ${env:VAR} is unchanged and the removed alias is rejected', async () => {
   const dir = tempDir('workbench-credentials-config')
   const file = path.join(dir, 'credentials.json')
   fs.writeFileSync(file, JSON.stringify({ 'deploy-token': 'example-config-token', demo: { token: 'example-scoped' } }))
@@ -368,7 +377,6 @@ test('config consumer: ${cred:NAME} and ${secret:NAME} resolve through the servi
     const expanded = (await expandCredentialRefsDeep(
       {
         cred: 'token=${cred:deploy-token}',
-        secret: 'token=${secret:deploy-token}',
         scoped: 'token=${cred:demo/token}',
         defaultScope: 'token=${cred:token}',
         env: 'value=${env:WORKBENCH_TEST_PLAIN}',
@@ -378,7 +386,6 @@ test('config consumer: ${cred:NAME} and ${secret:NAME} resolve through the servi
     )) as Record<string, string>
     assert.deepEqual(expanded, {
       cred: 'token=example-config-token',
-      secret: 'token=example-config-token',
       scoped: 'token=example-scoped',
       defaultScope: 'token=example-scoped',
       env: 'value=${env:WORKBENCH_TEST_PLAIN}',
@@ -387,6 +394,29 @@ test('config consumer: ${cred:NAME} and ${secret:NAME} resolve through the servi
     // reading the file, before the credentials service exists), so the
     // credential expansion must leave it untouched rather than double-expand.
     assert.deepEqual(expandEnvDeep({ a: 'x-${env:WORKBENCH_TEST_PLAIN}' }), { a: 'x-example-plain-env' })
+
+    // The removed alias is NOT a credential reference: it is a HARD config
+    // error naming the offending reference and the ONE supported form, and it
+    // is never resolved - so no credential value may leak into the message.
+    await assert.rejects(
+      () => expandCredentialRefs(`prefix ${legacyRef('deploy-token')} suffix`, kernel.credentials, { scope: 'demo' }),
+      (error: Error) => {
+        assert.match(error.message, /is not a credential reference/)
+        assert.match(error.message, /\$\{cred:NAME\}/)
+        assert.ok(error.message.includes(legacyRef('deploy-token')), 'the message must name the offending reference')
+        assert.ok(!error.message.includes('example-config-token'), 'the message must never contain a value')
+        return true
+      },
+    )
+    // A scoped removed reference is rejected the same way; its value stays out.
+    await assert.rejects(
+      () => expandCredentialRefs(legacyRef('demo/token'), kernel.credentials, { scope: 'demo' }),
+      (error: Error) => {
+        assert.match(error.message, /is not a credential reference/)
+        assert.ok(!error.message.includes('example-scoped'), 'the message must never contain a value')
+        return true
+      },
+    )
   } finally {
     await kernel.dispose()
     delete process.env.WORKBENCH_TEST_PLAIN

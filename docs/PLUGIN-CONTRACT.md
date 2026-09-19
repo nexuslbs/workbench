@@ -144,7 +144,7 @@ four core providers (`env`, `file`, `project-env`, `user-env`):
   No core change is involved: the manifest declaration above plus these two
   config rows are the whole wiring.
 - **Consumer**: uses the capability through `ctx.credentials` (or the config
-  `${cred:NAME}` / `${secret:NAME}` references). A consumer never imports a
+  `${cred:NAME}` references). A consumer never imports a
   provider, and a provider never imports a consumer.
 
 Dependency direction is `Provider -> Definition <- Consumer`, enforced by

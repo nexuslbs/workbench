@@ -152,17 +152,29 @@ never imports a provider. Anywhere a STRING config value is accepted, the
 following references are expanded:
 
 ```
-${cred:NAME}          ${secret:NAME}          ${cred:SCOPE/NAME}
+${cred:NAME}          ${cred:SCOPE/NAME}
 ```
 
-`cred` and `secret` are aliases with byte-identical behaviour.
+**Reference syntax: intentional breaking change.** `${cred:NAME}` (scoped:
+`${cred:SCOPE/NAME}`) is the ONE credential reference form. A config value that
+still carries the legacy alias - the very same reference body written with the
+kind token `secret` instead of `cred` - is NOT resolved any more: the loader
+fails fast with a config error that names the offending reference and the
+supported form, for example
+
+```
+config: '<the offending reference>' is not a credential reference: the legacy 'secret' alias was removed; write '${cred:NAME}' (or '${cred:SCOPE/NAME}') instead - see docs/CREDENTIALS.md
+```
+
+so a stale config is caught at boot instead of silently keeping a reference that
+would never resolve.
 
 Rules:
 
 - The reference body is trimmed; `SCOPE/NAME` is split at the FIRST `/`, so
   `team/deploy-token` resolves with scope `team` and name `deploy-token`
   (a provider that ignores scopes still answers for the name - see section 2).
-- An EMPTY reference (`${cred:}` / `${secret:  }`) is a config error.
+- An EMPTY reference (`${cred:}`) is a config error.
 - An unresolvable reference is a HARD error naming the reference and the enabled
   providers tried, never a value:
 
@@ -192,7 +204,7 @@ credentials:
 plugins:
   hello-world:
     # resolved through the credentials service, provider agnostic
-    message: "token is ${cred:DEPLOY_TOKEN}"   # or ${secret:DEPLOY_TOKEN}
+    message: "token is ${cred:DEPLOY_TOKEN}"
     scoped: "team is ${cred:team/deploy-token}"
 ```
 
@@ -284,7 +296,7 @@ workbench credentials explain deploy-token  # per-provider trace: answered / mis
 
 **10. Hygiene:** the provider must not log, echo or persist values and its errors
 must name the endpoint and the reference, never the value (section 4). Keep real
-tokens in the provider's own configuration as `${env:VAR}` / `${secret:NAME}`
+tokens in the provider's own configuration as `${env:VAR}` / `${cred:NAME}`
 references; never commit them.
 
 ## Private plugin sources: source auth + the BOOTSTRAP credential set
@@ -311,7 +323,7 @@ Layering (both halves are the same Definition; only availability differs):
 | Layer | Made of | Available | Used by |
 | --- | --- | --- | --- |
 | bootstrap set | CORE providers only, no plugins, no cordis | before any plugin is loaded | `git` source auth (fetch), the loader/host |
-| `ctx.credentials` | core + plugin-provided providers, selected by `credentials.providers` | after plugins load | config `${cred:NAME}` / `${secret:NAME}` expansion, plugins |
+| `ctx.credentials` | core + plugin-provided providers, selected by `credentials.providers` | after plugins load | config `${cred:NAME}` expansion, plugins |
 
 Selection is configuration: `credentials.bootstrap` lists the core provider ids in
 precedence order (default: all four, in declaration order). Only CORE ids are
