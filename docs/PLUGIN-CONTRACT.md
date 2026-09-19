@@ -592,17 +592,21 @@ plugins:
       personal:
         number: "+15551234567"          # the TO number whose inbox is read
         accountSid: ACxxxxxxxx           # not a secret; ${cred:NAME} also works
-        authToken: ${cred:TWILIO_PERSONAL_TOKEN}
+        authToken: TWILIO_PERSONAL_TOKEN # a credential NAME (or ${cred:NAME})
       work:
         number: "+15557654321"
         accountSid: ACyyyyyyyy
-        authToken: ${cred:TWILIO_WORK_TOKEN}
+        authToken: TWILIO_WORK_TOKEN
 ```
 
-Secrets are referenced, not written: a provider row configures the plugin and is
-applied BEFORE the kernel's `${cred:NAME}` expansion, so a provider resolves a
-credential reference itself at CALL time through `ctx.credentials` - which is
-exactly why a missing credential leaves the plugin loaded with that number
+Secrets are referenced, not written: `authToken` is a credential NAME or the
+core's `${cred:NAME}` spelling, and `accountSid` is a literal unless it carries a
+reference of its own. A provider row configures the plugin and is applied BEFORE
+the kernel's `${cred:NAME}` expansion, so a provider resolves a reference itself
+at CALL time through `ctx.credentials`. The NAME form is the one that keeps a
+config BOOTABLE with an empty credential store: the kernel expands
+`${cred:NAME}` before the plugins load and an unresolvable one is FATAL, whereas
+a NAME that does not resolve leaves the plugin loaded with that number
 not-configured. Committing a real token is forbidden and no token crosses the
 contract. The capability is covered by `npm run check:seam` (`sms` joins the
 `credentials`/`email`/`totp` rules). A working external provider (Twilio REST,
