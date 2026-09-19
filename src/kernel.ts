@@ -8,9 +8,11 @@ import { loadPlugins, type LoadFailure, type PluginDiscovery, type SourceReport 
 import { resolveSourceAuths } from './source-auth.ts'
 import { sourceId, type SourceAuthOutcome } from './sources.ts'
 import { CommandRegistry } from './registry.ts'
-import { registerToolRoutes } from './tool-routes.ts'
-import { WEB, DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, Web, type WebHandler } from './web/definition.ts'
-import { createWebServer, type WebServer } from './web/providers/http.ts'
+// The core's OWN routes on the web seam (the loader status, the inventory, the
+// tool dispatch). The seam is declared STRUCTURALLY in tool-routes.ts on purpose:
+// the `web@1` Definition lives in the EXTERNAL plugins repository and the core
+// must not import it.
+import { registerToolRoutes, type WebRequest, type WebResponse, type WebSeam } from './tool-routes.ts'
 import type { ConfigApi, LoadedPlugin, Workbench, WorkbenchConfig } from './types.ts'
 
 export interface KernelOptions {
@@ -28,18 +30,33 @@ export interface KernelOptions {
   log?: (message: string) => void
 }
 
-/** Options of {@link Kernel.startWeb}: the serve/loader seam, no product feature. */
-export interface StartWebOptions {
-  /** Bind host (default 127.0.0.1 - the UI has no auth in this round). */
-  host?: string
-  /** Bind port (default 12348; `0` picks a free port). */
-  port?: number
-  /**
-   * Handler the web provider calls when the seam does not answer (before its
-   * 404), so `serve` can keep its status endpoint on the same listener as the
-   * UI. Passing one does not change any seam registration.
-   */
-  fallback?: WebHandler
+/** The capability id of the web seam (`web@1`); its Definition lives in the plugins repository. */
+export const WEB = 'web'
+
+/**
+ * The state of the WEB capability (`web@1`) in this deployment.
+ *
+ * The core ships NO web provider: an enabled `web:` section IMPLICITLY DEPENDS
+ * on a plugin providing the seam (`web-impl` in the external plugins
+ * repository). Without one the section is DEFERRED - structured state, a loud
+ * log line, no crash, no silent skip - and it becomes eligible the moment such a
+ * plugin is loaded.
+ */
+export interface WebState {
+  /** `served`: a provider plugin is loaded; `deferred`: asked for but unserved; `off`: not asked for. */
+  state: 'served' | 'deferred' | 'off'
+  /** True when the config asks for the Web UI (`web.enabled: true`). */
+  enabled: boolean
+  /** The plugin that serves the seam (`served` only). */
+  plugin?: string
+  /** Its provider id, e.g. `http` (`served` only). */
+  provider?: string
+  /** The source that plugin came from (`served` only). */
+  source?: string
+  /** Whether that source is external (`served` only). */
+  external?: boolean
+  /** Why the section is not served (`deferred` only). */
+  reason?: string
 }
 
 export interface Kernel {
@@ -52,11 +69,11 @@ export interface Kernel {
    */
   credentials: CredentialsService
   /**
-   * The WEB capability (`ctx.web`): the seam UI plugins register routes, assets
-   * and pages with. The kernel provides the service; {@link Kernel.startWeb}
-   * starts the core `node:http` provider for it.
+   * The state of the WEB capability (`web@1`): the seam AND its listener come
+   * from a PROVIDER PLUGIN (external repository). The core only reports whether
+   * the deployment is served, deferred (asked for, no provider loaded) or off.
    */
-  web: Web
+  webState: WebState
   /**
    * The EMAIL capability (`email@1`): what consumers call (`accounts`, `list`,
    * `get`, `code`, `search`) and what provider plugins register with
@@ -79,10 +96,6 @@ export interface Kernel {
   readonly failures: LoadFailure[]
   /** Configured sources, live from the host. */
   readonly sources: SourceReport[]
-  /** Starts the core web provider for {@link Kernel.web}; close it with {@link Kernel.dispose}. */
-  startWeb(options?: StartWebOptions): Promise<WebServer>
-  /** The web server started by {@link Kernel.startWeb}, when one is running. */
-  readonly webServer: WebServer | undefined
   dispose(): Promise<void>
 }
 
@@ -126,22 +139,13 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const ctx = new Context()
   await ctx.plugin({ name: 'workbench', apply: (c) => { c.provide('workbench', registry) } })
 
-  // The WEB seam (the definition): the kernel provides the service, so a UI
-  // plugin can register routes/assets/pages from any source. No socket here -
-  // that is the provider's job, started by `startWeb`.
-  let web!: Web
-  await ctx.plugin({ name: WEB, apply: (c) => { web = new Web(c) } })
-
-  // The by-name TOOL INVOCATION surface: the registered tools belong to the
-  // plugins, the routes are the core's contract for them. Registered here (the
-  // composition root) so a caller can discover and invoke tools through the web
-  // seam; the dispatch reads the live registry, so it follows load/unload.
-  registerToolRoutes(web, registry)
-
-  // The LOADER's own observation surface, registered by the composition root on
-  // the web seam: the plugin-less core still ANSWERS (its status and its
-  // inventory) instead of 404ing. No product feature: it reports the loader
-  // state only; every page, asset, route and UI comes from a plugin.
+  // The WEB capability lives ENTIRELY in the EXTERNAL plugins repository: the
+  // `web@1` Definition AND the server providers (`web-impl`). The core hosts no
+  // seam and no listener; it registers its OWN routes on the seam once a provider
+  // plugin has provided it (see `registerCoreRoutes` called after the plugins
+  // load), so the plugin-less core still ANSWERS instead of 404ing without owning
+  // any web code. With no provider loaded the seam never exists, nothing is
+  // registered, and {@link Kernel.webState} reports the DEFERRED state loudly.
   const statusPayload = (): string =>
     JSON.stringify(
       {
@@ -154,36 +158,50 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       null,
       2,
     )
-  const statusHandler: WebHandler = (request) => {
+  const statusHandler = (request: WebRequest): WebResponse | undefined => {
     if (request.method !== 'GET' && request.method !== 'HEAD') return undefined
     if (request.path !== '/health' && request.path !== '/healthz') return undefined
     return { contentType: 'application/json; charset=utf-8', body: statusPayload() + '\n' }
   }
-  web.route({ method: 'GET', path: '/health', handler: statusHandler, description: 'the loader status (core)' })
-  web.route({ method: 'HEAD', path: '/health', handler: statusHandler, description: 'the loader status (core)' })
-  web.route({
-    method: 'GET',
-    path: '/api/plugins',
-    description: 'the loader inventory (core): an EMPTY list is a valid answer',
-    handler: (request) => {
-      if (request.method !== 'GET') return undefined
-      const inventory = host.inventory()
-      return {
-        contentType: 'application/json; charset=utf-8',
-        body: JSON.stringify(
-          {
-            plugins: inventory.plugins,
-            discovered: inventory.discovered,
-            available: inventory.available,
-            failures: inventory.failures,
-            sources: inventory.sources,
-          },
-          null,
-          2,
-        ) + '\n',
-      }
-    },
-  })
+  const pluginsHandler = (request: WebRequest): WebResponse | undefined => {
+    if (request.method !== 'GET') return undefined
+    const inventory = host.inventory()
+    return {
+      contentType: 'application/json; charset=utf-8',
+      body: JSON.stringify(
+        {
+          plugins: inventory.plugins,
+          discovered: inventory.discovered,
+          available: inventory.available,
+          failures: inventory.failures,
+          sources: inventory.sources,
+        },
+        null,
+        2,
+      ) + '\n',
+    }
+  }
+
+  /**
+   * Registers the core's OWN routes on the seam: the loader status endpoint the
+   * deployment healthchecks probe, the loader inventory and the by-name tool
+   * dispatch. Called ONLY when a `web@1` provider plugin provided `ctx.web`; the
+   * handlers read the live host/registry, so they follow load/unload/reload.
+   */
+  const registerCoreRoutes = (web: WebSeam): void => {
+    web.route({ method: 'GET', path: '/health', handler: statusHandler, description: 'the loader status (core)' })
+    web.route({ method: 'HEAD', path: '/health', handler: statusHandler, description: 'the loader status (core)' })
+    web.route({
+      method: 'GET',
+      path: '/api/plugins',
+      description: 'the loader inventory (core): an EMPTY list is a valid answer',
+      handler: pluginsHandler,
+    })
+    // The by-name TOOL INVOCATION surface: the registered tools belong to the
+    // plugins, the routes are the core's contract for them; the dispatch reads
+    // the live registry, so it follows load/unload.
+    registerToolRoutes(web, registry)
+  }
 
   // The credentials service: the DEFINITION's own implementation (the routing
   // walk, no backend) and NOTHING else. The core declares and registers NO
@@ -420,13 +438,58 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     disabled: [...new Set([...providers.disabled, ...rest.disabled])],
   })
 
-  let webServer: WebServer | undefined
+  // ---------------------------------------------------------------------------
+  // THE WEB GATE (operator rule, 2026-09-19): the core ships NO web provider - the
+  // `web@1` Definition AND the server providers live in the EXTERNAL plugins
+  // repository. An enabled `web:` section therefore IMPLICITLY DEPENDS on a plugin
+  // providing the seam. Without one the section is DEFERRED: a structured state,
+  // a loud log line, no crash, no silent skip - the core keeps running. It becomes
+  // eligible the moment such a plugin is loaded: the seam appears as `ctx.web`,
+  // the core routes below register, and the provider owns the listener (so
+  // `workbench serve` leaves the port to it instead of binding it itself).
+  // ---------------------------------------------------------------------------
+  const webProvider = plugins
+    .map((plugin) => ({
+      plugin,
+      capability: plugin.capabilityList.find((capability) => capability.id === WEB && capability.provider !== undefined),
+    }))
+    .find((entry) => entry.capability !== undefined)
+  const webEnabled = config.web?.enabled === true
+  const webSeam = (ctx as unknown as { web?: WebSeam }).web
+  const webState: WebState = webProvider
+    ? {
+        state: 'served',
+        enabled: webEnabled,
+        plugin: webProvider.plugin.name,
+        provider: webProvider.capability?.provider ?? '',
+        source: webProvider.plugin.source,
+        external: webProvider.plugin.external,
+      }
+    : webEnabled
+      ? {
+          state: 'deferred',
+          enabled: true,
+          reason:
+            'no plugin providing web@1 is loaded: add a web provider plugin (web-impl) to the plugins: roster from the ' +
+            'external source https://github.com/nexuslbs/workbench-plugins',
+        }
+      : { state: 'off', enabled: false }
+  if (webState.state === 'deferred') log(`[workbench] web is DEFERRED: ${webState.reason}`)
+  else if (webState.state === 'served') {
+    log(
+      `[workbench] web served by plugin '${webState.plugin}' (provider '${webState.provider}', ` +
+        `${webState.external ? 'external:' : ''}${webState.source})`,
+    )
+  }
+
+  // The core's own routes on the seam, registered only when a provider plugin
+  // actually provided `ctx.web` (a deployment running the web provider).
+  if (webSeam) registerCoreRoutes(webSeam)
 
   return {
     ctx,
     registry,
     credentials,
-    web,
     host,
     configFile,
     get config(): WorkbenchConfig {
@@ -441,24 +504,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     get sources(): SourceReport[] {
       return host.inventory().sources
     },
-    async startWeb(start: StartWebOptions = {}): Promise<WebServer> {
-      if (webServer) return webServer
-      webServer = await createWebServer(web, {
-        host: start.host ?? DEFAULT_WEB_HOST,
-        port: start.port ?? DEFAULT_WEB_PORT,
-        log,
-        ...(start.fallback ? { fallback: start.fallback } : {}),
-      })
-      return webServer
-    },
-    get webServer(): WebServer | undefined {
-      return webServer
-    },
+    webState,
     dispose: async () => {
-      if (webServer) {
-        await webServer.close()
-        webServer = undefined
-      }
+      // The listener belongs to the provider PLUGIN: disposing the fiber tree runs
+      // its effects, which close the server and unregister the seam and routes.
       await ctx.fiber.dispose()
     },
   }

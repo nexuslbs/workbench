@@ -49,10 +49,20 @@ plugins:
   # installing a source and disabling a plugin must be possible at run time,
   # without rebuilding the image.
   plugin-manager: {}
+  # The WEB provider plugin: the `web@1` seam AND its listener live in the
+  # EXTERNAL plugins repository (the core ships no web module at all). This row is
+  # what turns `web.enabled: true` below into a SERVED deployment instead of a
+  # DEFERRED one, and this PLUGIN - not the core - owns the published port, so it
+  # is also what makes the plugin-manager / settings HTTP seams answer.
+  web-impl:
+    host: 0.0.0.0
+    port: 12347
 
-# The Web UI provider. Enabling it exposes the plugin-manager / settings HTTP
-# seams the live add/remove-plugin check drives; the port equals the status port,
-# so the UI and `/health` share ONE listener (the docker-compose contract).
+# The Web UI section: a REQUEST, SERVED by a provider plugin (`web-impl`,
+# rostered above from the external source). With such a plugin the deployment
+# serves the UI, `/health` and the plugin HTTP seams on ONE listener on this port
+# (the docker-compose contract); without one the core reports the section as
+# DEFERRED and keeps running, binding the port itself to answer `/health` only.
 web:
   enabled: true
   host: 0.0.0.0

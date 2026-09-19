@@ -31,7 +31,44 @@
  * the routes on a `Web` service and returns their disposer, exactly like any
  * other consumer. It adds no product feature to the core.
  */
-import type { Web, WebRequest, WebResponse } from './web/definition.ts'
+/**
+ * The web seam as THIS module uses it, declared STRUCTURALLY on purpose: the
+ * `web@1` Definition lives in the EXTERNAL plugins repository
+ * (`nexuslbs/workbench-plugins/definitions/web.ts`) and is implemented by a
+ * provider plugin, so the core must not import it. A provider instance
+ * satisfies these shapes (method-style members are checked bivariantly), which
+ * is the same trick the external consumer plugins use for their own seams.
+ */
+export interface WebRouteSpec {
+  method: string
+  path: string
+  handler: (request: WebRequest) => WebResponse | undefined | void | Promise<WebResponse | undefined | void>
+  description?: string
+}
+
+/** The subset of a seam request the tool routes read. */
+export interface WebRequest {
+  method: string
+  path: string
+  params?: Record<string, string>
+  query?: URLSearchParams
+  headers?: Record<string, string | string[] | undefined>
+  readText(): Promise<string>
+  readJson<T = unknown>(): Promise<T>
+}
+
+/** What a seam route answers. */
+export interface WebResponse {
+  status?: number
+  contentType?: string
+  headers?: Record<string, string>
+  body?: string | Uint8Array
+}
+
+/** The seam the routes are registered on (a `web@1` provider plugin provides it). */
+export interface WebSeam {
+  route(spec: WebRouteSpec): () => void
+}
 import { TOOLS_CONTRACT, ToolArgsError, ToolUnknownError, type ToolInfo } from './tool-registry.ts'
 
 /** The capability this module serves: the registry with its single dispatch. */
@@ -135,7 +172,7 @@ function listPayload(source: ToolSource): unknown {
  * wanted to serve tools itself could call it too. Nothing here is a product
  * feature: the tools are the plugins'.
  */
-export function registerToolRoutes(web: Web, source: ToolSource): () => void {
+export function registerToolRoutes(web: WebSeam, source: ToolSource): () => void {
   const disposers: Array<() => void> = [
     web.route({
       method: 'GET',

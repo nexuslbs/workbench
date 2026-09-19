@@ -6,8 +6,19 @@ import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
 import { CREDENTIALS_CONTRACT, parseCredentialRef, refLabel } from './credentials/definition.ts'
 import { createKernel, type Kernel } from './kernel.ts'
 import { TOOLS_CONTRACT, ToolArgsError, ToolUnknownError } from './tool-registry.ts'
+import type { WebSeam } from './tool-routes.ts'
 import type { LoadedPlugin, PluginDiscoveryInfo } from './types.ts'
-import { DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, type WebHandler } from './web/definition.ts'
+
+/**
+ * The READ side of the `web@1` seam, declared structurally on purpose: the
+ * Definition and the provider live in the EXTERNAL plugins repository
+ * (`nexuslbs/workbench-plugins`), so the core never imports them.
+ */
+interface WebSeamRead extends WebSeam {
+  pages(): { title: string; path: string; plugin: string }[]
+  routes(): unknown[]
+  assets(): unknown[]
+}
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** Directory of the core package, the fallback location of the default config. */
@@ -16,6 +27,13 @@ const CORE_DIR = path.resolve(HERE, '..')
 /** Default port of the `serve` status endpoint (published by the dev overlay). */
 export const DEFAULT_PORT = 12347
 
+/**
+ * Default bind port of the `web@1` PROVIDER PLUGIN (`web-impl`). The core keeps no
+ * listener of its own; this number is used ONLY to decide whether that plugin
+ * binds the service port too (so the core status listener stays off it).
+ */
+export const WEB_PROVIDER_DEFAULT_PORT = 12348
+
 /** Interval of the `serve` heartbeat log line. */
 const HEARTBEAT_MS = 60_000
 
@@ -23,9 +41,9 @@ const HELP = `workbench - minimal cordis plugin host
 
 Usage:
   workbench serve [--port <n>]    boot the plugins and keep running (service mode;
-                                  also serves the Web UI when the config enables it)
-  workbench web [--host <h>] [--port <n>]
-                                  serve the browser UI and keep running
+                                  the Web UI is served by the web provider plugin)
+  workbench web [--port <n>]      boot the plugins, report the web state and keep
+                                  running (the UI listener belongs to the plugin)
   workbench <command> [args...]   run a command registered by a plugin
   workbench plugins               list loaded plugins and their sources
   workbench commands              list registered commands
@@ -48,8 +66,10 @@ Options:
                    ${DEFAULT_CONFIG_FILES.join(', ')}
                    in the working directory, then next to the core)
   --port <n>       serve: status endpoint port (default: $WORKBENCH_PORT or ${DEFAULT_PORT});
-                   web: Web UI port (default: $WORKBENCH_WEB_PORT, the config, else ${DEFAULT_WEB_PORT})
-  --host <h>       Web UI listener host (default: $WORKBENCH_WEB_HOST, the config, else ${DEFAULT_WEB_HOST})
+                   web: Web UI port used by the web provider plugin (default:
+                   $WORKBENCH_WEB_PORT, the config, else ${WEB_PROVIDER_DEFAULT_PORT})
+  --host <h>       Web UI listener host read by the web provider plugin
+                   (default: $WORKBENCH_WEB_HOST, the config, else 127.0.0.1)
   --web-port <n>   serve only: Web UI port when the config enables the UI;
                    set it to the status port (--port) to serve the UI AND
                    /health on ONE listener
@@ -62,8 +82,9 @@ Environment:
                    falls back to the default config file lookup described above
   WORKBENCH_PORT   serve only: status endpoint port (default: ${DEFAULT_PORT})
   WORKBENCH_WEB_HOST / WORKBENCH_WEB_PORT
-                   Web UI listener when the config enables it; the default host is
-                   ${DEFAULT_WEB_HOST} (loopback - the UI has NO auth)
+                   Web UI listener WHEN a web provider plugin (web-impl) is
+                   loaded; the default host is 127.0.0.1 (loopback - the UI has
+                   NO auth). The core itself hosts no web listener.
   WORKBENCH_CACHE_DIR  where git plugin sources are checked out
                    (default: <config dir>/.workbench/sources)
 `
@@ -138,15 +159,10 @@ function resolvePort(flags: Flags): number {
 }
 
 /**
- * Web host resolution order: `--host`, `WORKBENCH_WEB_HOST`, the config, then
- * the loopback default. The default is deliberate: this round has no auth, so
- * exposing the UI to another machine must be an explicit act.
+ * Web port resolution order: `--port`/`--web-port`, `WORKBENCH_WEB_PORT`, the
+ * config, then the default of the `web@1` provider. The core uses it to know
+ * whether the provider plugin BINDS the status port (it must not bind it too).
  */
-function resolveWebHost(explicit: string | undefined, fromConfig: string | undefined): string {
-  return explicit ?? process.env.WORKBENCH_WEB_HOST?.trim() ?? fromConfig?.trim() ?? DEFAULT_WEB_HOST
-}
-
-/** Web port resolution order: `--port`/`--web-port`, `WORKBENCH_WEB_PORT`, the config, then the default. */
 function resolveWebPort(explicit: number | undefined, fromConfig: number | undefined): number {
   if (explicit !== undefined) return explicit
   const fromEnv = process.env.WORKBENCH_WEB_PORT?.trim()
@@ -155,7 +171,7 @@ function resolveWebPort(explicit: number | undefined, fromConfig: number | undef
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`WORKBENCH_WEB_PORT must be a port number (0-65535), got '${fromEnv}'`)
     return port
   }
-  return fromConfig ?? DEFAULT_WEB_PORT
+  return fromConfig ?? WEB_PROVIDER_DEFAULT_PORT
 }
 
 function describePlugin(plugin: LoadedPlugin): string {
@@ -281,16 +297,21 @@ async function credentialsCommand(kernel: Kernel, flags: Flags): Promise<void> {
  * a container that only sleeps would report `Up` while hosting nothing.
  */
 async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> {
-  // The Web UI attaches to THIS process: `serve` is the single long-running
-  // entrypoint of the service, so when the config enables the UI the core web
-  // provider starts here too. When the configured WEB port IS the status port
-  // both live on ONE listener: the provider serves the UI and hands the status
-  // path to the fallback below, so the published port carries the browser UI and
-  // the healthcheck together. Different ports keep the two-listener setup.
+  // The WEB capability is served by a PROVIDER PLUGIN from an external source:
+  // the core ships no seam and no listener. `kernel.webState` reports what this
+  // deployment got:
+  //   served   -> the provider plugin owns its port and answers /health there
+  //               (from the same live inventory), so the core must NOT bind it;
+  //   deferred -> the config asks for the web UI but no provider plugin is
+  //               loaded: structured deferral, no crash, no silent skip;
+  //   off      -> nothing was asked for.
+  const webState = kernel.webState
   const webConfig = kernel.config.web ?? {}
-  const webEnabled = webConfig.enabled === true
-  const webPort = webEnabled ? resolveWebPort(flags.webPort, webConfig.port) : undefined
-  const merged = webEnabled && webPort === port
+  const webPort = resolveWebPort(flags.webPort, webConfig.port)
+  // Does the CORE own the published port? Only when no provider plugin serves
+  // it: with `served` the plugin binds the port itself, and a second listener on
+  // it would be an EADDRINUSE crash.
+  const coreOwnsPort = webState.state !== 'served' || webPort !== port
   const status = (): string =>
     JSON.stringify(
       {
@@ -301,30 +322,23 @@ async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> 
         plugins: kernel.plugins,
         sources: kernel.sources,
         failures: kernel.failures,
+        web: webState,
       },
       null,
       2,
     )
 
-  /** The status endpoint, riding the UI listener when the two share a port. */
-  const statusFallback: WebHandler = (request) => {
-    if (request.method !== 'GET' && request.method !== 'HEAD') return undefined
-    if (request.path !== '/health' && request.path !== '/healthz') return undefined
-    return { contentType: 'application/json; charset=utf-8', body: status() + '\n' }
-  }
-
-  let webServer: Awaited<ReturnType<Kernel['startWeb']>> | undefined
-  if (webEnabled) {
-    webServer = await kernel.startWeb({
-      host: resolveWebHost(flags.host, webConfig.host),
-      port: webPort,
-      ...(merged ? { fallback: statusFallback } : {}),
-    })
+  // Where the deployment IS served, the provider PLUGIN writes its own line
+  // ([web-impl] serving web@1 on http://...); the core reports the state it
+  // observed instead of owning a listener it no longer has.
+  if (webState.state === 'served') {
     process.stdout.write(
-      merged
-        ? `workbench: web UI on ${webServer.url} (web.enabled; one listener with the status endpoint, /health answers there too)\n`
-        : `workbench: web UI on ${webServer.url} (web.enabled in the config)\n`,
+      `workbench: web served by plugin '${webState.plugin}' (provider '${webState.provider}', ` +
+        `${webState.external ? 'external:' : ''}${webState.source}) on port ${webPort}` +
+        `${coreOwnsPort ? `; the core status endpoint stays on ${port}` : ' (this process hosts no web listener of its own)'}\n`,
     )
+  } else if (webState.state === 'deferred') {
+    process.stdout.write(`workbench: web is DEFERRED - ${webState.reason}\n`)
   }
 
   /** The plain status listener: the JSON status on `/health`, `/` and `/?...`. */
@@ -339,9 +353,9 @@ async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> 
     response.end(JSON.stringify({ status: 'not found', path: url }) + '\n')
   }
 
-  // Merged: the UI listener owns the port and the status endpoint rides on it
-  // (through the fallback). Not merged: the status listener is alone on it.
-  const server = merged ? undefined : http.createServer(handleStatus)
+  // The plain status listener runs only when the CORE owns the port (no web
+  // provider plugin, or the provider was pointed at a different port).
+  const server = coreOwnsPort ? http.createServer(handleStatus) : undefined
 
   if (server) {
     await new Promise<void>((resolve, reject) => {
@@ -371,40 +385,34 @@ async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> 
   })
   clearInterval(heartbeat)
   if (server) await new Promise<void>((resolve) => server.close(() => resolve()))
-  if (webServer) await webServer.close()
 }
 
 /**
- * Long-running Web UI entrypoint (`workbench web`): boots the kernel, starts the
- * core web provider (the seam) and stays up until SIGINT/SIGTERM. The UI itself
- * is built by the plugins the config loads - with none, the empty shell is
- * served, which is what makes "UI is composed ONLY of plugins" checkable.
- * The core adds NO product feature here: it serves bytes and routes them.
+ * Long-running Web UI entrypoint (`workbench web`): boots the kernel and stays up
+ * until SIGINT/SIGTERM. The UI itself - the listener, the shell, every page,
+ * route and asset - comes from the `web@1` PROVIDER PLUGIN the config loads; the
+ * core reports the state and hosts nothing. With no provider plugin loaded the
+ * deferral is reported (no crash, no silent skip) and the process keeps serving.
  */
 async function web(kernel: Kernel, flags: Flags): Promise<void> {
-  const webConfig = kernel.config.web ?? {}
-  const server = await kernel.startWeb({
-    host: resolveWebHost(flags.host, webConfig.host),
-    port: resolveWebPort(flags.port ?? flags.webPort, webConfig.port),
-  })
-  process.stdout.write(`workbench: web UI on ${server.url} config=${kernel.configFile}\n`)
+  const state = kernel.webState
+  const origin = state.plugin ? ` plugin=${state.plugin} (provider ${state.provider}, ${state.external ? 'external:' : ''}${state.source})` : ''
+  process.stdout.write(`workbench: web state=${state.state}${origin} config=${kernel.configFile}\n`)
+  if (state.state === 'deferred') process.stdout.write(`workbench: web is DEFERRED - ${state.reason}\n`)
   process.stdout.write(summaryLine(kernel) + '\n')
-  const pages = kernel.web.pages()
-  process.stdout.write(
-    pages.length
-      ? `pages: ${pages.map((page) => `${page.title} ${page.path} (${page.plugin})`).join(', ')}\n`
-      : 'pages: none - no UI plugin is configured, the empty shell is served\n',
-  )
-  process.stdout.write(`seam: ${pages.length} page(s), ${kernel.web.routes().length} route(s), ${kernel.web.assets().length} asset(s)\n`)
-  await new Promise<void>((resolve) => {
-    const stop = (signal: NodeJS.Signals): void => {
-      process.stdout.write(`workbench: ${signal} received, shutting down\n`)
-      resolve()
-    }
-    process.once('SIGINT', stop)
-    process.once('SIGTERM', stop)
-  })
-  await server.close()
+  const seam = (kernel.ctx as unknown as { web?: WebSeamRead }).web
+  if (seam) {
+    const pages = seam.pages()
+    process.stdout.write(
+      pages.length
+        ? `pages: ${pages.map((page) => `${page.title} ${page.path} (${page.plugin})`).join(', ')}\n`
+        : 'pages: none - no UI plugin is configured, the empty shell is served\n',
+    )
+    process.stdout.write(`seam: ${pages.length} page(s), ${seam.routes().length} route(s), ${seam.assets().length} asset(s)\n`)
+  } else {
+    process.stdout.write('seam: not provided - no web@1 provider plugin is loaded\n')
+  }
+  await serve(kernel, flags, resolvePort(flags))
 }
 
 async function main(): Promise<void> {

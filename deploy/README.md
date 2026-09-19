@@ -19,8 +19,11 @@ curl -fsS http://127.0.0.1:12347/health   # -> {"status":"ok",...}
 - `git` + `ca-certificates` are installed so plugin sources of kind `git` can be
   cloned; `WORKBENCH_CACHE_DIR=/var/cache/workbench` is a writable checkout dir.
 - The default command is `node src/cli.ts serve`: it boots the configured
-  plugins, serves `/health` (and the Web UI when the config enables it) on
-  `WORKBENCH_PORT` (default `12347`), and stays up.
+  plugins, serves `/health` (and, when the config rosters the web PROVIDER PLUGIN from the
+  external source, the Web UI too) on `WORKBENCH_PORT` (default `12347`), and
+  stays up. The web server itself is a PLUGIN (`web-impl`): with
+  `web.enabled: true` and no provider plugin the core reports `web: deferred`
+  and answers `/health` on the port itself.
 - **Minimal by design**: the image is a *core* checkout. No plugin repository is
   vendored into it, no deployment config is baked in, no secret is baked in.
 
@@ -52,7 +55,7 @@ run-time input, the image is created ONCE and never changes:
 `deploy/ci/deployment.config.yml` is the config the CI validation uses: NO core
 plugin source (the image is a core checkout and the core ships ZERO plugins)
 plus the **external** `nexuslbs/workbench-plugins` repository as a `git` source,
-and the Web UI enabled so the live add/remove checks can drive the
+and the `web-impl` provider plugin rostered so the live add/remove checks can drive the
 plugin-manager seam.
 
 ## Publishing (GitHub Actions, `.github/workflows/publish.yml`)

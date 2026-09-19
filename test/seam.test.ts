@@ -4,13 +4,15 @@
 // it must FAIL on each forbidden import direction, so the check cannot rot into a
 // no-op.
 //
-// v0.0.2: the core ships NO plugin and, of the capability implementations, only
-// the `web` serve providers (`src/web/providers/`). The credential providers
-// moved to the PUBLIC `nexuslbs/workbench-plugins` repository as the plugin
-// `credentials-basic`; `email`, `sms`, `totp` and the tool registry are plugin
-// concerns. The fixtures below therefore use `src/web/providers/` and
-// `src/credentials/providers/` - the latter is an empty directory kept under the
-// rule so a provider module placed there is still classified as a provider.
+// v0.0.3: the core ships NO plugin and NO capability implementation - not even a
+// web provider. The credential DEFINITION is the only capability module left in
+// `src/`; every provider (`credentials-basic`, `web-impl`, ...) and the whole
+// `web` module (Definition + the http/shell servers) live in the PUBLIC
+// `nexuslbs/workbench-plugins` repository. The fixtures below therefore use
+// `src/credentials/providers/` and `src/credentials/definition.ts` - the only
+// capability directory left under the rule - and one test pins the
+// CORE-MINIMALITY guard: a module that moved out fails the check when it
+// reappears under `src/`.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -44,18 +46,18 @@ test('this repository respects Provider -> Definition <- Consumer', () => {
 test('the check FAILS when a PROVIDER imports a CONSUMER', () => {
   const root = fixtureRoot({
     'src/config.ts': 'export const config = 1\n',
-    'src/web/providers/p.ts': "import { config } from '../../config.ts'\nexport const p = config\n",
+    'src/credentials/providers/p.ts': "import { config } from '../../config.ts'\nexport const p = config\n",
   })
-  assert.deepEqual(summary(root), ['src/web/providers/p.ts (provider) -> src/config.ts (consumer)'])
+  assert.deepEqual(summary(root), ['src/credentials/providers/p.ts (provider) -> src/config.ts (consumer)'])
   fs.rmSync(root, { recursive: true, force: true })
 })
 
 test('the check FAILS when a CONSUMER imports a PROVIDER', () => {
   const root = fixtureRoot({
-    'src/web/providers/p.ts': 'export const p = 1\n',
-    'src/config.ts': "import { p } from './web/providers/p.ts'\nexport const config = p\n",
+    'src/credentials/providers/p.ts': 'export const p = 1\n',
+    'src/config.ts': "import { p } from './credentials/providers/p.ts'\nexport const config = p\n",
   })
-  assert.deepEqual(summary(root), ['src/config.ts (consumer) -> src/web/providers/p.ts (provider)'])
+  assert.deepEqual(summary(root), ['src/config.ts (consumer) -> src/credentials/providers/p.ts (provider)'])
   fs.rmSync(root, { recursive: true, force: true })
 })
 
@@ -80,10 +82,23 @@ test('the check FAILS when a CONSUMER imports a CREDENTIALS provider module', ()
 test('the check FAILS when a DEFINITION imports a consumer (the contract depends on nobody)', () => {
   const root = fixtureRoot({
     'src/config.ts': 'export const config = 1\n',
-    'src/web/definition.ts': "import { config } from '../config.ts'\nexport const definition = config\n",
+    'src/credentials/definition.ts': "import { config } from '../config.ts'\nexport const definition = config\n",
   })
-  assert.deepEqual(summary(root), ['src/web/definition.ts (definition) -> src/config.ts (consumer)'])
+  assert.deepEqual(summary(root), ['src/credentials/definition.ts (definition) -> src/config.ts (consumer)'])
   fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('the CORE-MINIMALITY guard fails when a module that moved out reappears under src/', () => {
+  const root = fixtureRoot({
+    'src/web/definition.ts': 'export const WEB = "web"\n',
+    'src/email/definition.ts': 'export const EMAIL = "email"\n',
+  })
+  assert.deepEqual(summary(root), [
+    'src/email (other) -> nexuslbs/workbench-plugins (other)',
+    'src/web (other) -> nexuslbs/workbench-plugins (other)',
+  ])
+  fs.rmSync(root, { recursive: true, force: true })
+  assert.deepEqual(checkSeam(ROOT).violations, [], 'the real core must stay minimal')
 })
 
 test('the check FAILS when the CREDENTIALS DEFINITION imports a consumer', () => {

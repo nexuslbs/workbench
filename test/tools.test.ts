@@ -27,8 +27,9 @@ import {
   type ToolInfo,
 } from '../src/tool-registry.ts'
 import { registerToolRoutes } from '../src/tool-routes.ts'
-import { WEB, Web } from '../src/web/definition.ts'
-import { createWebServer } from '../src/web/providers/http.ts'
+// TEST DOUBLE: the real `web@1` Definition + provider moved to the EXTERNAL
+// plugins repository, so the core tests use test/web-fixture.ts instead.
+import { WEB, Web, createWebServer } from './web-fixture.ts'
 
 /** The tool schema the fixtures below register: one required, two optional params. */
 const GREET_PARAMETERS: ParameterSchemaSpec = {
@@ -104,7 +105,7 @@ function toolFixture(): ToolFixture {
 async function seam(): Promise<{ ctx: Context; web: Web }> {
   const ctx = new Context()
   let web!: Web
-  await ctx.plugin({ name: WEB, apply: (c) => { web = new Web(c) } })
+  await ctx.plugin({ name: WEB, apply: () => { web = new Web() } })
   return { ctx, web }
 }
 
@@ -291,7 +292,12 @@ test('a plugin that registers tools owns them, and unloading it disposes them (l
     configDir: fixture.dir,
     log: () => {},
   })
-  const server = await kernel.startWeb({ host: '127.0.0.1', port: 0 })
+  // The web PROVIDER (and with it the seam) lives in the EXTERNAL plugins
+  // repository, so this core test registers the core's tool routes on the test
+  // double and serves them itself: same routes, same dispatch, no core provider.
+  const web = new Web()
+  registerToolRoutes(web, kernel.registry)
+  const server = await createWebServer(web, { host: '127.0.0.1', port: 0 })
   const names = async (): Promise<string[]> =>
     (((await (await fetch(`${server.url}/api/tools`)).json()) as { tools: ToolInfo[] }).tools.map((tool) => tool.name))
   const status = async (): Promise<number> => (await fetch(`${server.url}/api/tools/hello%20greet`, { method: 'POST', body: '{"name":"Ada"}' })).status

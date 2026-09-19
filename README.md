@@ -127,12 +127,11 @@ workbench: web UI on http://127.0.0.1:12348 (config <path>)
 
 - Bind: `--host` / `--port` flag, then `$WORKBENCH_WEB_HOST` / `$WORKBENCH_WEB_PORT`,
   then the `web:` section of the config, then `127.0.0.1:12348`.
-- `workbench serve` (the service mode) starts the web provider in the SAME
-  process when the config sets `web.enabled: true`. When the configured web port
-  equals the status port (`WORKBENCH_PORT`, default 12347) the two share ONE
-  listener: the browser UI, its shell/assets/routes AND `/health` (the status
-  JSON the compose healthcheck probes) all answer on that single port - which is
-  how the dev service serves the browser UI on the published 12347.
+- `workbench serve` (the service mode) reports the WEB state: with a web PROVIDER
+  PLUGIN loaded (from an external source) that plugin owns the published port -
+  the browser UI, its shell/assets/routes AND `/health` all answer on it. With
+  `web.enabled: true` and NO provider plugin the section is DEFERRED: the core
+  logs it, answers `/health` on the port itself and keeps running.
 - No auth this round: the default bind is loopback on purpose. Binding a
   non-loopback host exposes the UI to everyone who can reach it.
 
@@ -319,12 +318,18 @@ workbench/                       the KERNEL: no plugin, no feature module
   src/
     cli.ts        CLI entrypoint (npm run dev)
     credentials/  the credentials capability: the DEFINITION only (no provider)
+    tool-registry.ts  the named-tool registry (dispatch only: no tool ships here)
+    tool-routes.ts    the HTTP/CLI routes that dispatch those tools
     kernel.ts     boot: cordis root context + workbench service + load + ${cred:} gate
     loader.ts     plugin discovery + manifest validation + import + ctx.plugin
     registry.ts   the workbench service (commands + plugins)
     sources.ts    source resolution (path + git cache; auth is a credential REF)
     source-auth.ts  a credential ref -> a TRANSIENT git auth argument
-    web/          the web seam: definition + the node:http server the core wires
+    web/ would be a REGRESSION: the whole web module (the web@1 Definition AND
+          the http/shell servers) lives in nexuslbs/workbench-plugins
+          (definitions/web.ts, plugins/web-impl) since v0.0.3; the core only
+          keeps the `web:` config section and DEFERS it until a provider plugin
+          is loaded
     config.ts     JSON/YAML config reading, default-file lookup, ${env:VAR} expansion
     types.ts      manifest / command / plugin / config types + the ctx.workbench type
   test/

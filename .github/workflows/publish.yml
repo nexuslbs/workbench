@@ -185,6 +185,14 @@ jobs:
           cat /tmp/health.json
           echo
 
+          # `/health` on the PUBLISHED port must be answered by the web@1 PROVIDER
+          # PLUGIN (the external `web-impl`), NOT by a core fallback listener: the
+          # whole web module lives in the plugins repository (operator rule), and
+          # only the provider health body carries the `web@1` CONTRACT marker, so a
+          # DEFERRED deployment (core status JSON) fails here instead of passing.
+          grep -q '"contract": "web@1"' /tmp/health.json
+          echo "OK: /health on the published port is served by the web@1 provider plugin from the external source"
+
           echo "== CLI: plugins (no core plugin: every plugin comes from an external source) =="
           docker exec wb-test node src/cli.ts plugins | tee /tmp/plugins.txt
           grep -q 'hello-world@0.1.0  external:workbench-plugins' /tmp/plugins.txt

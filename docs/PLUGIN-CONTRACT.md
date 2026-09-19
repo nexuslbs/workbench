@@ -240,28 +240,51 @@ and the core decides how to hand them over.
 
 ## 4c. Web capability (`ctx.web`)
 
-The Web UI is composed ONLY of plugins. The core knows how to SERVE bytes and
-how to route them - it ships no page, no router, no template engine and no UI
-framework. This is the same three-role seam as credentials
-(`Provider -> Definition <- Consumer`, `web@1`):
+The Web UI is composed ONLY of plugins - the CORE INCLUDED: since v0.0.3 the
+core ships no server, no router, no page and not even the capability
+Definition. The whole web module lives in the PUBLIC
+`nexuslbs/workbench-plugins` repository. It is the same three-role seam as
+credentials (`Provider -> Definition <- Consumer`, `web@1`):
 
-- **Definition** (core, `src/web/definition.ts`, exported from `src/index.ts`):
-  the typed contract plus the `Web` service handle. It touches no socket and no
-  file.
-- **Provider**: the serving side. The core ships exactly one,
-  `src/web/providers/http.ts` (a `node:http` server wired by the composition
-  root `src/kernel.ts`); it is the only core module that touches a socket. It
-  serves, in order: the minimal core shell (`/`, any registered page path,
-  `/shell.css`, `/shell.js`), the static assets plugins registered (read from the
-  plugin directory on every request), the routes plugins registered, then a JSON
-  404. Everything it registers (`GET /api/web/pages`, the shell assets) is
-  disposed when the server is closed.
+- **Definition**: `definitions/web.ts` of `nexuslbs/workbench-plugins` (the
+  typed contract, the `Web` service handle, `WEB_CONTRACT = 'web@1'` and the
+  defaults). It touches no socket, no file, no cordis module and no core module:
+  being external, it may depend on nothing but itself. The core does NOT export
+  it any more - importing the core no longer hands you the web seam.
+- **Provider**: the plugin `web-impl` of the same repository, declaring
+  `{ "id": "web", "version": 1, "provider": "http" }` in its manifest. It
+  provides the seam as the `web` SERVICE (so a consumer from ANY source
+  registers through `ctx.web`), owns the `node:http` listener and serves, in
+  order: the minimal shell (`/`, any registered page path, `/shell.css`,
+  `/shell.js`), the static assets plugins registered (read from the plugin
+  directory on every request), the routes plugins registered, its own `/health`,
+  then a JSON 404. Everything it registers is disposed on unload: no global
+  state, no socket left behind.
 - **Consumer**: a UI plugin. It registers routes/assets/pages through `ctx.web`
-  and never imports a provider.
+  and never imports a provider. A consumer from another repository declares the
+  seam STRUCTURALLY (its own request/response/route types), exactly like the
+  other service seams, because the Definition is not a core module.
 
 `inject: ['web']` is required to touch the seam. Every registration returns its
 disposer, so wrap it in `ctx.effect(...)` and unloading the plugin removes its
-routes, assets and pages cleanly (proved by `test/web.test.ts`).
+routes, assets and pages cleanly.
+
+### The `web@1` deferral gate (v0.0.3)
+
+The core still READS the `web:` config section, but it implements nothing: an
+enabled section is a REQUEST that only a plugin providing `web@1` can serve. The
+gate has the same shape as the `${cred:}` one:
+
+- `served`: a loaded plugin declares the capability
+  `{ "id": "web", "version": 1, "provider": "..." }`. The core reports it (the
+  plugin name, its provider id, its source), registers its OWN routes
+  (`/health`) on the seam and then STEPS BACK: the plugin owns the port, and the
+  core must not bind it (a second listener would crash with `EADDRINUSE`).
+- `deferred`: `web.enabled: true` and NO provider plugin loaded. Structured
+  output (`GET /health` reports `web.state: "deferred"` plus the reason), one
+  loud log line, no crash and no silent skip; the process keeps serving. The
+  section becomes eligible the moment such a plugin is loaded.
+- `off`: nothing was asked for.
 
 | Member | Meaning |
 | --- | --- |
@@ -282,26 +305,28 @@ server.
 
 | Command | Behaviour |
 | --- | --- |
-| `workbench web` (or `npm run web`) | Boots the kernel and starts the Web UI listener (the serve/loader seam only). Prints the URL. |
-| `workbench serve` | The long-running service mode (status endpoint on `--port`/`$WORKBENCH_PORT`, default 12347). When the config sets `web.enabled: true` the SAME process also starts the Web UI listener - one long-running process, not a second mode. |
+| `workbench web` | Boots the kernel and reports the web state. With a `web@1` provider plugin loaded, THAT plugin serves the UI on its own port (the URL is logged by the plugin); without one the command reports the deferred state and starts no listener. |
+| `workbench serve` | The long-running service mode (status endpoint on `--port`/`$WORKBENCH_PORT`, default 12347). `web.enabled: true` makes the section eligible; a loaded provider plugin owns the port from its own config, and the core keeps its status listener as well when the two ports differ. |
 
 ```yaml
 web:
-  enabled: true      # serve also starts the Web UI (absent/false keeps today's behaviour)
+  enabled: true      # a REQUEST: only a web@1 provider plugin can serve it
   host: 127.0.0.1    # loopback by default: the UI has no auth in this round
   port: 12348
 ```
 
-Resolution order: flag (`--host`, `--port`), then environment
-(`$WORKBENCH_WEB_HOST`, `$WORKBENCH_WEB_PORT`), then the config, then the
-documented defaults `127.0.0.1:12348`. With no UI plugin configured the server
-still boots and serves the empty shell ("no pages registered"); the CLI surfaces
-(`hello`, `plugins`, `commands`, `credentials`) are unchanged.
+Port resolution of the listener the PROVIDER binds (the plugin's own row wins):
+`plugins.<provider>.port`, then `$WORKBENCH_WEB_PORT`, then `$WORKBENCH_PORT`
+(the port a deployment publishes), then the definition default `12348`. That
+order is what lets ONE published port carry the UI and the `/health` the compose
+healthcheck probes: publish 12347, roster the provider with `port: 12347`, and
+the provider answers both while the core binds nothing.
 
 A UI plugin is an ordinary plugin: a directory in any configured source with a
 manifest (`entry`, `capabilities` - e.g. `web:page:plugin-inventory`) and an
 entry module that registers its routes, assets and page. Removing it from the
-config leaves the server (and every other surface) working.
+config leaves the provider (and every other surface) working; removing the
+PROVIDER plugin from the config leaves the core running with `web: deferred`.
 
 ## 4d. Tools capability (`ctx.workbench.registerTool`)
 

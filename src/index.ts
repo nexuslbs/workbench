@@ -1,4 +1,4 @@
-export { createKernel, type Kernel, type KernelOptions, type StartWebOptions } from './kernel.ts'
+export { createKernel, type Kernel, type KernelOptions } from './kernel.ts'
 export { CommandRegistry } from './registry.ts'
 export { Host, type HostEntry, type HostOptions, type AdoptedState } from './host.ts'
 export {
@@ -49,8 +49,9 @@ export * from './credentials/definition.ts'
 // seam that exposes the registry by name (`POST /api/tools/<name>`).
 export * from './tool-registry.ts'
 export { registerToolRoutes, type ToolSource } from './tool-routes.ts'
-// The WEB seam: the definition (what a UI plugin registers routes, assets and
-// pages with) plus the core `node:http` provider the composition root wires.
-export * from './web/definition.ts'
-export { createWebServer, MAX_BODY_BYTES, type WebServer, type WebServerOptions } from './web/providers/http.ts'
+// The WEB capability lives ENTIRELY in the EXTERNAL plugins repository
+// (`nexuslbs/workbench-plugins`): `definitions/web.ts` is the `web@1`
+// Definition and `plugins/web-impl` provides the HTTP server. The core ships no
+// web module and no server - it LOADS the provider plugin and DEFERS the `web:`
+// section until one is loaded (see `cli.ts` and docs/PLUGIN-CONTRACT.md 4c).
 export * from './types.ts'

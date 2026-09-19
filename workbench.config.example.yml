@@ -56,11 +56,13 @@ sources: []
 #     message: Hello World
 plugins: {}
 
-# Web UI (composed by UI plugins through the ctx.web seam; the core only serves
-# bytes and routes). `workbench web` starts the listener; `workbench serve`
-# starts the same listener in the service process when `enabled` is true.
+# Web UI. The whole web module (the web@1 Definition AND the http server) lives
+# in the EXTERNAL nexuslbs/workbench-plugins repository (definitions/web.ts,
+# plugins/web-impl), so this section is a REQUEST: roster the `web-impl` plugin
+# in `plugins:` above and it serves the UI + /health on its own port. With
+# `enabled: true` and no such plugin the core reports `web: deferred` and keeps
+# running (structured state, no crash, no silent skip).
 # Absent or `enabled: false` keeps the historical behaviour exactly.
-# (UI plugins come from an external source like every other plugin.)
 # web:
 #   enabled: true
 #   host: 127.0.0.1

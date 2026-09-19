@@ -36,13 +36,26 @@ const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
  * `src/`: a definition module, optional core provider modules, and consumers.
  * Adding a capability here is what puts it under the check.
  */
-// v0.0.2: the core ships NO plugin and no capability IMPLEMENTATION except the
-// `web` serve providers. The credential providers moved to the PUBLIC
-// `nexuslbs/workbench-plugins` repository (plugin `credentials-basic`); `email`,
-// `sms`, `totp` and the tool registry are plugin concerns now. The directory
-// entries are kept so a provider module placed under one of them is still
-// classified as a provider (the rule must not rot).
-const CAPABILITIES = ['credentials', 'web']
+// v0.0.3: the core ships NO plugin and NO capability implementation at all - not
+// even a web provider. The credentials DEFINITION is the only capability module
+// left in this tree (every provider lives in the PUBLIC
+// `nexuslbs/workbench-plugins` repository, e.g. `credentials-basic`); `web` (its
+// Definition AND the http/shell servers), `email`, `sms`, `totp` and the tool
+// registry are plugin concerns now. The directory entry is kept so a provider
+// module placed under it is still classified as a provider (the rule must not
+// rot).
+const CAPABILITIES = ['credentials']
+
+/**
+ * The capability directories allowed to keep a DEFINITION in the core. v0.0.3:
+ * `credentials` only - the whole `web` module (its Definition AND the http/shell
+ * servers), `email`, `sms`, `totp` and the tool registry live in the PUBLIC
+ * `nexuslbs/workbench-plugins` repository. The kernel is config load + cordis
+ * source discovery + plugin install + `${cred:}` resolution ONLY (operator rule,
+ * 2026-09-19), so any OTHER `src/<capability>/` holding a definition module or a
+ * provider under `providers/` is a REGRESSION and fails the check.
+ */
+const CORE_DEFINITIONS = ['credentials']
 /** Definition modules: `src/<capability>/definition.ts`. */
 const DEFINITIONS = CAPABILITIES.map((capability) => `src/${capability}/definition.ts`)
 /** Provider modules: `src/<capability>/providers/` (a provider may also live in another repo). */
@@ -150,7 +163,44 @@ export function checkSeam(root: string): { scanned: number; violations: Violatio
       violations.push({ file: relative, layer, target, targetLayer, because: rule.because })
     }
   }
-  return { scanned: files.length, violations }
+  return { scanned: files.length, violations: [...coreMinimalityViolations(root), ...violations] }
+}
+
+/**
+ * The CORE-MINIMALITY guard: a capability module that moved out of the core (its
+ * Definition included) must never reappear under `src/` - the kernel loads the
+ * config, discovers sources, installs plugins and resolves `${cred:}`, nothing
+ * else. Feature work belongs in a plugin of `nexuslbs/workbench-plugins`.
+ */
+function coreMinimalityViolations(root: string): Violation[] {
+  const src = path.join(root, 'src')
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(src, { withFileTypes: true })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+  const offenders = entries
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+    .map((entry) => entry.name)
+    .filter((capability) => !CORE_DEFINITIONS.includes(capability))
+    .filter((capability) => {
+      if (fs.existsSync(path.join(src, capability, 'definition.ts'))) return true
+      const providers = path.join(src, capability, 'providers')
+      return fs.existsSync(providers) && fs.readdirSync(providers).some((file) => file.endsWith('.ts'))
+    })
+    .sort()
+  return offenders.map(
+    (capability): Violation => ({
+      file: `src/${capability}`,
+      layer: 'other',
+      target: 'nexuslbs/workbench-plugins',
+      targetLayer: 'other',
+      because:
+        'the core is config load + cordis source discovery + plugin install + ${cred:} resolution ONLY: this capability (its Definition and its providers) belongs in the PUBLIC nexuslbs/workbench-plugins repository',
+    }),
+  )
 }
 
 function main(): void {

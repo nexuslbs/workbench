@@ -33,19 +33,13 @@ test('the default config ships ZERO plugins and still boots an empty kernel', as
     assert.deepEqual(inventory.available, [])
     assert.deepEqual(inventory.failures, [])
 
-    // The plugin-less core still SERVES: the inventory answers an EMPTY list,
-    // not an error (negative control of the "zero core plugins" requirement).
-    const server = await kernel.startWeb({ host: '127.0.0.1', port: 0 })
-    try {
-      const response = await fetch(`${server.url}/health`)
-      assert.equal(response.status, 200)
-      const status = (await response.json()) as { status?: string; plugins?: unknown[]; sources?: unknown[] }
-      assert.equal(status.status, 'ok')
-      assert.deepEqual(status.plugins, [])
-      assert.deepEqual(status.sources, [])
-    } finally {
-      await server.close()
-    }
+    // The plugin-less core stays BOOTABLE and reports the web state instead of
+    // starting a listener: the `web@1` provider is a PLUGIN (external repo) and
+    // the core ships none. `off` here (the default config asks for no web UI),
+    // `deferred` when it is asked for and unserved: never a crash, never a
+    // silent skip (test/web-state.test.ts covers both states end to end).
+    assert.equal(kernel.webState.state, 'off', 'no web provider plugin and no web: section')
+    assert.equal(kernel.webState.enabled, false)
   } finally {
     await kernel.dispose()
   }
