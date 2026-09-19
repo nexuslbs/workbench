@@ -313,6 +313,14 @@ async function credentialsCommand(kernel: Kernel, flags: Flags): Promise<void> {
  */
 async function serve(kernel: Kernel): Promise<void> {
   const webState = kernel.webState
+  // THE BOOT BANNER - the ONE documented exception to "the core prints nothing
+  // outside the service path" (task R1/2): this report IS the answer of the
+  // service-mode command (the same inventory `workbench plugins` prints), it is
+  // emitted ONCE at boot and it is not a log stream. Everything periodic or
+  // event-driven (the heartbeat, the shutdown line, the control channel) goes
+  // through the logger SERVICE instead, where a LOG line is rendered by whichever
+  // EXPORTER PLUGIN is mounted and is silent when none is. The banner is what
+  // lets an operator see the state a deployment booted with.
   if (webState.state === 'served') {
     process.stdout.write(
       `workbench: web served by plugin '${webState.plugin}' (provider '${webState.provider}', ` +
@@ -329,17 +337,21 @@ async function serve(kernel: Kernel): Promise<void> {
   process.stdout.write(credentialsLines(kernel, false) + '\n')
   for (const failure of kernel.failures) process.stdout.write(`  failed ${failure.plugin} (${failure.source}): ${failure.error}\n`)
 
-  // The heartbeat is deliberately NOT unref'd: with no `web@1` provider plugin
+  // The heartbeat is a LOG line, not CLI output: it goes through the logger
+  // service of this process (`ctx.logger('workbench')`), so an exporter plugin
+  // renders it and a deployment with no exporter plugin mounted is silent.
+  //
+  // The interval is deliberately NOT unref'd: with no `web@1` provider plugin
   // the core binds NO socket, so this interval is the one handle that keeps the
   // process (and the loaded plugins) alive until SIGINT/SIGTERM. Unref'ing it
   // made `serve` exit right after boot once the core stopped owning a listener.
   const heartbeat = setInterval(() => {
-    process.stdout.write(`workbench: alive (pid ${process.pid}, uptime ${Math.round(process.uptime())}s, ${kernel.plugins.length} plugin(s))\n`)
+    kernel.ctx.logger('workbench').info(`alive (pid ${process.pid}, uptime ${Math.round(process.uptime())}s, ${kernel.plugins.length} plugin(s))`)
   }, HEARTBEAT_MS)
 
   await new Promise<void>((resolve) => {
     const stop = (signal: NodeJS.Signals): void => {
-      process.stdout.write(`workbench: ${signal} received, shutting down\n`)
+      kernel.ctx.logger('workbench').info(`${signal} received, shutting down`)
       resolve()
     }
     process.once('SIGINT', stop)
@@ -399,7 +411,13 @@ async function withControlChannel(kernel: Kernel, body: () => Promise<void>): Pr
       kernel.refreshCoreRoutes()
       return report
     },
-    log: (message) => process.stdout.write(`workbench: ${message}\n`),
+    // The channel's diagnostics are LOG lines like any other: they go through
+    // the logger service of THIS process (rendered by whichever exporter plugin
+    // is mounted), not straight to stdout. This is also the proof that the
+    // service is reachable from the CLI context: `kernel.ctx` is the context the
+    // CLI boots, so a CLI-side message has the same named/levelled path as a
+    // plugin's.
+    log: (message) => kernel.ctx.logger('control').info(message),
   })
   try {
     await body()

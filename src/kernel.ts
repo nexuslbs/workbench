@@ -27,7 +27,13 @@ export interface KernelOptions {
   cacheDir?: string
   /** Set false to skip external sources (`--no-external`). */
   includeExternal?: boolean
-  /** Log sink; defaults to stderr so command output stays clean on stdout. */
+  /**
+   * Log sink OVERRIDE. By default every kernel line goes through the cordis
+   * logger SERVICE that every cordis context installs (`ctx.logger('workbench')`),
+   * so the line is rendered by whichever EXPORTER PLUGIN is mounted and reaches
+   * NO sink at all when none is: output belongs to plugins, the core ships no
+   * exporter and no formatter (docs/PLUGIN-CONTRACT.md, "Logging").
+   */
   log?: (message: string) => void
 }
 
@@ -146,9 +152,16 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     configFile = loaded.file
   }
 
-  const log = options.log ?? ((message: string) => console.error(`[workbench] ${message}`))
-  const registry = new CommandRegistry(log)
+  // The kernel's OWN diagnostics (the deferral notices, the web state, the boot
+  // inventory, plus everything `host` / `loader` / `control` report through this
+  // callback) go through the cordis logger SERVICE: `ctx.logger('workbench')`
+  // yields a named logger whose Messages are handed to whatever EXPORTER PLUGINS
+  // are mounted. There is deliberately NO console fallback - with no exporter
+  // plugin mounted the process emits NOTHING, which IS the model (a sink is a
+  // plugin; the core owns no exporter, no formatter and no console.* call).
   const ctx = new Context()
+  const log = options.log ?? ((message: string) => ctx.logger('workbench').info(message))
+  const registry = new CommandRegistry(log)
   await ctx.plugin({ name: 'workbench', apply: (c) => { c.provide('workbench', registry) } })
 
   // The WEB capability lives ENTIRELY in the EXTERNAL plugins repository: the
@@ -284,7 +297,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const hasProvider = (): boolean => credentials.providers().some((provider) => provider.registered)
   const logDeferral = (id: string): void =>
     log(
-      `[workbench] source '${id}' is DEFERRED: its config needs a credential (${'${cred:...}'} / auth) but no plugin ` +
+      `source '${id}' is DEFERRED: its config needs a credential (${'${cred:...}'} / auth) but no plugin ` +
         `implementing credentials@1 is loaded yet; load a credentials provider plugin (credentials-basic) from a ` +
         `source that needs no credential and the source becomes eligible`,
     )
@@ -445,7 +458,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   for (const name of gatedPluginNames) {
     delete roster[name]
     log(
-      `[workbench] plugin '${name}' is DEFERRED: its config needs a credential (` + refToken + `...) but no plugin ` +
+      `plugin '${name}' is DEFERRED: its config needs a credential (` + refToken + `...) but no plugin ` +
         `implementing credentials@1 is loaded yet; load a credentials provider plugin and the plugin becomes eligible`,
     )
   }
@@ -524,10 +537,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
             'external source https://github.com/nexuslbs/workbench-plugins',
         }
       : { state: 'off', enabled: false }
-  if (webState.state === 'deferred') log(`[workbench] web is DEFERRED: ${webState.reason}`)
+  if (webState.state === 'deferred') log(`web is DEFERRED: ${webState.reason}`)
   else if (webState.state === 'served') {
     log(
-      `[workbench] web served by plugin '${webState.plugin}' (provider '${webState.provider}', ` +
+      `web served by plugin '${webState.plugin}' (provider '${webState.provider}', ` +
         `${webState.external ? 'external:' : ''}${webState.source})`,
     )
   }
@@ -544,7 +557,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const bootInventory = host.inventory()
   const rostered = Object.keys(config.plugins ?? {}).length
   log(
-    `[workbench] ${bootInventory.plugins.length} plugin(s) loaded of ${rostered} rostered ` +
+    `${bootInventory.plugins.length} plugin(s) loaded of ${rostered} rostered ` +
       `(${bootInventory.available.length} available, ${bootInventory.disabled.length} disabled, ` +
       `${bootInventory.failures.length} failed); mutation surface: ` +
       (bootInventory.mutationSurface.loaded

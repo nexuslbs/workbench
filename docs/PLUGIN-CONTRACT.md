@@ -778,3 +778,66 @@ Contract:
 Config shape (types): `SourceSpec.auth: { type?: 'token' | 'github-app';
 credential: string; username?: string; appId?: number | string;
 installationId?: number | string; apiBase?: string }`.
+
+## Logging: a SERVICE in the core + EXPORTER plugins
+
+The kernel logs through the cordis **logger service** and produces NO output of
+its own. There is no `console.log` in the core, **no core exporter and no core
+formatter**: every sink is an EXPORTER PLUGIN, mounted by the config roster from
+the external plugins repository (`nexuslbs/workbench-plugins`:
+`logger-console`, `logger-jsonl`, `logger-ring`, ...). "One exporter = one
+plugin, never a monolithic logger plugin."
+
+### What the core hosts (and all it hosts)
+
+Every cordis `Context` installs `ctx.logger` (cordis `LoggerService`), so a
+LOADED PLUGIN ALREADY HAS THE SERVICE - no core code is needed to expose it:
+
+```ts
+// inside a plugin's apply(ctx, config)
+ctx.logger('my-plugin').info('a named, levelled, structured Message')
+const dispose = ctx.logger.exporter({ levels: { default: 2 }, export: (m) => { /* a sink */ } })
+```
+
+- `ctx.logger(name?)` -> `{ error, warn, info, debug }`; the name defaults to the
+  plugin's fiber name, so `Message.name` identifies the emitter.
+- `ctx.logger.exporter(exporter)` registers a SINK and returns a disposable; the
+  registration is a cordis `effect`, so it is removed automatically when the
+  plugin (its fiber) unloads, and it is filtered by the exporter's own `levels`.
+- The `Message` handed to a sink is
+  `{ sn, ts, name, type, level, args, fiber? }` - a structure, not prose.
+
+The core's own lines (deferrals, web state, boot inventory, the `host`/`loader`/
+`control` diagnostics) go through the same service under the name `workbench`:
+`KernelOptions.log` is an OVERRIDE, and its default is
+`(message) => ctx.logger('workbench').info(message)`. There is deliberately NO
+console fallback.
+
+### Zero exporters = zero output
+
+That is the model, not a bug. With no exporter plugin mounted nothing is
+printed, so a deployment silences itself by removing a roster row, and a sink is
+added by adding one. The cordis `LoggerService` also keeps a bounded internal
+ring (1000 messages) that prints nothing.
+
+### The contract (plugins repository)
+
+The Definition is `definitions/logger.ts` of `nexuslbs/workbench-plugins`: the
+level enum/thresholds, the exporter interface, the message shape and the
+helpers (`mountExporter`, `loggerOf`, `levelThreshold`) a provider/consumer
+uses. See `docs/LOGGING.md` there for the sink authoring guide.
+
+### Documented exceptions (the ONLY prints outside the service path)
+
+1. `workbench serve` / `workbench web` print their **boot banner** once on
+   stdout (`src/cli.ts`, `serve()`): it is the answer of the service-mode
+   command - the same inventory `workbench plugins` prints - not a log stream,
+   and it is what lets an operator see the state of a deployment whose roster
+   mounted no exporter at all.
+2. The CLI prints its OWN results (`--help`, `plugins`, `commands`,
+   `credentials`, `reconcile`, a tool result) on stdout, and a USAGE error
+   (`unknown command`) on stderr BEFORE a result exists: those are the command's
+   answer, not diagnostics.
+3. A fatal error raised before a context exists (e.g. a config file that cannot
+   be parsed, or a control-channel failure in `reconcile`) is written to stderr
+   directly: there is no service and no kernel yet to route it through.
