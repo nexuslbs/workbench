@@ -231,3 +231,55 @@ test('the deferred section binds NO port: the process stays UP and reports the s
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a provider loaded AFTER the boot (out-of-band converge) gets the core routes registered on its seam', async () => {
+  // The production case (task 2524): a process booted a MINIMAL roster, so no
+  // `web@1` provider existed and the core had NO seam to register its own routes
+  // on. An OUT-OF-BAND converge then loads the provider: the listener comes up,
+  // and the core's routes (`/api/plugins`, the `/health` fallback) must appear on
+  // THAT seam instance - otherwise the converged deployment answers the plugin's
+  // routes and 404s the core's own inventory.
+  const fixture = webProviderFixture()
+  const configFile = path.join(fixture.dir, 'late-provider.yml')
+  const write = (roster: string): void => {
+    fs.writeFileSync(
+      configFile,
+      ['sources:', '  - kind: path', '    id: web-fixture', `    path: ${fixture.source}`, 'web:', '  enabled: true', roster, ''].join('\n'),
+    )
+  }
+  write('plugins: {}')
+  const kernel = await createKernel({ configFile, log: () => {} })
+  try {
+    assert.equal(kernel.webState.state, 'deferred', 'the minimal roster loads no provider')
+    assert.equal(kernel.registry.resolve(['seam', 'routes']), undefined, 'nothing serves the seam yet')
+    assert.equal(kernel.host.inventory().mutationSurface.loaded, false, 'and the process has no in-process mutation surface')
+
+    // The caller EDITS THE FILE (the desired roster) and converges OUT-OF-BAND.
+    write('plugins:\n  web-impl-fixture: {}')
+    const report = await kernel.host.reconcile()
+    assert.equal(report.ok, true, report.message)
+    kernel.refreshCoreRoutes()
+
+    const found = kernel.registry.resolve(['seam', 'routes'])
+    assert.ok(found, 'the provider that arrived LATE registered its reporting command')
+    const routes = JSON.parse(String(await found.command.run(found.args))) as string[]
+    assert.ok(
+      routes.includes('GET /api/plugins'),
+      `the core registered its inventory route on the seam that appeared later (${routes.join(', ')})`,
+    )
+    assert.ok(routes.includes('GET /health'), 'and its status route, which the fixture does not answer itself')
+
+    // Idempotent per seam instance: a second refresh must not register a duplicate
+    // (the `web@1` seam rejects a duplicate method+path).
+    kernel.refreshCoreRoutes()
+    const again = JSON.parse(String(await found.command.run(found.args))) as string[]
+    assert.equal(
+      again.filter((route) => route === 'GET /api/plugins').length,
+      1,
+      `exactly one inventory route on the seam (${again.join(', ')})`,
+    )
+  } finally {
+    await kernel.dispose()
+    fs.rmSync(fixture.dir, { recursive: true, force: true })
+  }
+})

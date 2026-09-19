@@ -390,7 +390,15 @@ async function withControlChannel(kernel: Kernel, body: () => Promise<void>): Pr
     socketPath: controlSocketPath(kernel.configFile),
     configFile: kernel.configFile,
     inventory: () => kernel.host.inventory(),
-    reconcile: () => kernel.host.reconcile(),
+    reconcile: async () => {
+      const report = await kernel.host.reconcile()
+      // A converge can load (or unload) the `web@1` PROVIDER plugin: the core's
+      // own routes belong to that seam INSTANCE, and a process that booted a
+      // minimal roster had none to register on. Without this the converged
+      // deployment answers the plugin's routes and 404s `/api/plugins`.
+      kernel.refreshCoreRoutes()
+      return report
+    },
     log: (message) => process.stdout.write(`workbench: ${message}\n`),
   })
   try {

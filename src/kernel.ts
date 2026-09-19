@@ -76,6 +76,16 @@ export interface Kernel {
    */
   webState: WebState
   /**
+   * Registers the core's OWN routes (`/api/plugins`, and `/health` only when the
+   * provider answers none) on the `web@1` seam, when a provider plugin provided
+   * one. Called at BOOT and by the OUT-OF-BAND converge: a process that booted a
+   * MINIMAL roster has no provider, so there is no seam to register on, and the
+   * listener appears only when the converge loads one - without this the
+   * converged deployment answers the plugin's routes and 404s the core's own.
+   * Idempotent per seam instance.
+   */
+  refreshCoreRoutes(): void
+  /**
    * The host (loader) API: the live plugin set and every mutation of it
    * (load/unload/reload/retry/enable/disable/install/uninstall). Also reachable
    * as `ctx.workbench.host()` from any plugin.
@@ -220,6 +230,20 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       description: 'the loader inventory (core): an EMPTY list is a valid answer',
       handler: pluginsHandler,
     })
+  }
+
+  /**
+   * The core's own routes belong to the seam INSTANCE a provider plugin created:
+   * this registers them once per instance and is safe to call again (a second
+   * call on the same seam is a no-op, so the `web@1` duplicate-route rejection is
+   * never hit). See {@link Kernel.refreshCoreRoutes}.
+   */
+  let coreRoutesSeam: WebSeam | undefined
+  const refreshCoreRoutes = (): void => {
+    const seam = (ctx as unknown as { web?: WebSeam }).web
+    if (seam === undefined || seam === coreRoutesSeam) return
+    registerCoreRoutes(seam)
+    coreRoutesSeam = seam
   }
 
   // The credentials service: the DEFINITION's own implementation (the routing
@@ -482,7 +506,6 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     }))
     .find((entry) => entry.capability !== undefined)
   const webEnabled = config.web?.enabled === true
-  const webSeam = (ctx as unknown as { web?: WebSeam }).web
   const webState: WebState = webProvider
     ? {
         state: 'served',
@@ -511,7 +534,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
 
   // The core's own routes on the seam, registered only when a provider plugin
   // actually provided `ctx.web` (a deployment running the web provider).
-  if (webSeam) registerCoreRoutes(webSeam)
+  refreshCoreRoutes()
 
   // The roster the FILE asks for versus the set that actually LOADED is a
   // first-class state, said in ONE line: a process that booted 2 plugins of 23
@@ -548,6 +571,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       return host.inventory().sources
     },
     webState,
+    refreshCoreRoutes,
     dispose: async () => {
       // The listener belongs to the provider PLUGIN: disposing the fiber tree runs
       // its effects, which close the server and unregister the seam and routes.
