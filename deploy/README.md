@@ -47,6 +47,13 @@ run-time input, the image is created ONCE and never changes:
   (`POST /api/settings/patch` persists + re-reads; the plugin-manager seam
   `POST /api/plugin-manager/action` installs/unloads/enables/disables plugins) -
   **no rebuild**;
+- or let the edit be applied on its own: when the `config-watch` PLUGIN from
+  `nexuslbs/workbench-plugins` is on the `plugins:` roster, the running process
+  WATCHES the config file and applies an external edit live (debounced, with
+  atomic-write handling, self-write suppression and its state at
+  `GET /api/config-watch/state`): it triggers the core's `host.reconcile()`, so
+  no restart and no HTTP lifecycle call are needed. Without that row the core
+  opens NO watch handle - the core itself never watches the file;
 - `.dockerignore` excludes `deploy/`, and no build stage `COPY`s a deployment
   config, so the config can never leak into a layer;
 - credentials in it are references **by name** only (`${cred:NAME}`, `${env:VAR}`),
