@@ -62,7 +62,8 @@ plugins:
 # rostered above from the external source). With such a plugin the deployment
 # serves the UI, `/health` and the plugin HTTP seams on ONE listener on this port
 # (the docker-compose contract); without one the core reports the section as
-# DEFERRED and keeps running, binding the port itself to answer `/health` only.
+# DEFERRED and keeps running, binding NO port of its own: the listener always
+# belongs to the provider plugin, so `/health` is unserved until it is rostered.
 web:
   enabled: true
   host: 0.0.0.0

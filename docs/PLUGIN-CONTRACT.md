@@ -391,7 +391,9 @@ Worked consumer example (the `hello-tool` plugin of the plugins repository):
 
 ```js
 export function apply(ctx, config = {}) {
-  ctx.effect(() => ctx.workbench.registerTool({
+  // a CONSUMER: it injects the tools capability (`inject: ['tools']`) and
+  // never imports the provider plugin
+  ctx.effect(() => ctx.tools.registerTool({
     name: 'hello greet',
     description: 'greets one person: required name, optional greeting and times',
     parameters: {
@@ -447,7 +449,7 @@ provider, consumer), exactly like credentials (4b) and web (4c):
   overrides them only when its backend can do better.
 - **Consumer**: uses `ctx.email` only, never a provider module. The
   operator-facing tools are registered by the `email-tools` plugin through
-  `ctx.workbench.registerTool` (4d) as `email accounts`, `email list`,
+  `ctx.tools.registerTool` (4d) as `email accounts`, `email list`,
   `email get` and `email code`, reachable over HTTP like every other tool.
 
 An account reference is a LABEL (`{ label: 'personal' }`); it never carries an
@@ -459,7 +461,7 @@ account. Where the labels, addresses and credentials come from is CONFIGURATION
 export function apply(ctx, config = {}) {
   // a CONSUMER: it injects the capability and never imports a provider
   ctx.inject(['email'], (c) => {
-    c.effect(() => c.workbench.registerTool({
+    c.effect(() => c.tools.registerTool({
       name: 'email code',
       description: 'the verification code of the newest matching message',
       parameters: {
@@ -494,7 +496,8 @@ TOTP (time-based one-time passwords) is a capability of the same three-role shap
 as credentials (4b), web (4c) and email (4e): an operator names a key once, and a
 consumer asks for the CURRENT code of that name.
 
-- **Definition** (core, `src/totp/definition.ts`, exported from `src/index.ts`):
+- **Definition** (the PUBLIC plugins repository, `nexuslbs/workbench-plugins`,
+  `definitions/totp.ts`):
   the typed contract, the `totp@1` version and the `ctx.totp` handle
   (`inject: ['totp']`). It names NO storage backend, NO config-file format, NO
   algorithm vocabulary beyond the contract types and no code generator: an
@@ -515,7 +518,7 @@ consumer asks for the CURRENT code of that name.
   A provider implements `entries()` and `code(label, { at? })` only.
 - **Consumer**: uses `ctx.totp` alone, never a provider module. The plugins repo
   ships `totp-tools`, which registers the tools `totp list` and `totp code`
-  through `ctx.workbench.registerTool` (4d), reachable over HTTP like every
+  through `ctx.tools.registerTool` (4d), reachable over HTTP like every
   other tool.
 
 | Member | Meaning |
@@ -571,7 +574,8 @@ number, plus an optional default), and a consumer reads the inbox of a number by
 LABEL and extracts a verification code from it. The capability READS and extracts
 only: it never sends an SMS, never provisions a number and never runs a webhook.
 
-- **Definition** (core, `src/sms/definition.ts`, exported from `src/index.ts`):
+- **Definition** (the PUBLIC plugins repository, `nexuslbs/workbench-plugins`,
+  `definitions/sms.ts`):
   the typed contract, the `sms@1` version and the typed `ctx.sms` handle
   (`inject: ['sms']`). It names NO backend, NO API and NO credential format: a
   number reference is a LABEL (an operator name such as `personal`), never a
@@ -595,7 +599,7 @@ only: it never sends an SMS, never provisions a number and never runs a webhook.
   definition algorithms).
 - **Consumer**: uses `ctx.sms` alone, never a provider module. The plugins repo
   ships `sms-tools`, which registers the tools `sms numbers`, `sms list`,
-  `sms get` and `sms code` through `ctx.workbench.registerTool` (4d), reachable
+  `sms get` and `sms code` through `ctx.tools.registerTool` (4d), reachable
   over HTTP like every other tool.
 
 | Member | Meaning |

@@ -386,6 +386,13 @@ export interface Workbench {
   /** Resolves argv to the longest matching command, the rest becomes args. */
   resolve(argv: string[]): { command: CommandDefinition; args: string[] } | undefined
   plugins(): LoadedPlugin[]
+  /**
+   * The plugin whose `apply` is currently running (the loader's attribution
+   * marker); `core` outside a plugin apply. A capability service uses it to
+   * report the plugin that OWNS a registration (the tools inventory, the web
+   * seam) rather than a caller supplied name.
+   */
+  attribution(): string
   log(message: string): void
   /** The loader inventory (read path; what `workbench plugins` prints). */
   inventory(): HostInventory

@@ -1,3 +1,4 @@
+import { applyingPlugin } from './attribution.ts'
 import type { CommandDefinition, LoadedPlugin } from './types.ts'
 
 /**
@@ -36,6 +37,18 @@ export class CommandRegistry {
     for (const [name, command] of this.#commands) {
       if (!known.has(name) && command.plugin === undefined) command.plugin = plugin
     }
+  }
+
+  /**
+   * The plugin whose `apply` is currently running (the loader's attribution
+   * marker), `core` outside a plugin apply. A capability service reads it to
+   * report the plugin that OWNS a registration (the tools inventory, the web
+   * seam) instead of trusting a caller supplied name. It is exposed on the
+   * service the core provides (`ctx.workbench.attribution()`), so a plugin can
+   * attribute its own registrations without importing anything from the core.
+   */
+  attribution(): string {
+    return applyingPlugin()
   }
 
   commandNames(): Set<string> {
