@@ -120,6 +120,47 @@ workbench: web UI on http://127.0.0.1:12348 (config <path>)
 - No auth this round: the default bind is loopback on purpose. Binding a
   non-loopback host exposes the UI to everyone who can reach it.
 
+## Tools API
+
+A plugin registers a named tool (a description, the parameters it expects and a
+handler) through `ctx.workbench.registerTool`; the core exposes it for by-name
+invocation over HTTP, with the parameters as the request body. Workbench has no
+model and no agent loop: the callers are plugins and operators. The full
+contract is [docs/PLUGIN-CONTRACT.md](docs/PLUGIN-CONTRACT.md) section 4d.
+
+| Route | Behaviour |
+| --- | --- |
+| `GET /api/tools` | every registered tool with `name`, `description`, `plugin` and its parameter schema. |
+| `GET /api/tools/<name>` | one tool descriptor. The name is ONE percent-encoded path segment: `/api/tools/hello%20greet`. |
+| `POST /api/tools/<name>` | invoke it - the JSON body IS the parameter object. |
+| `POST /api/tools` | alias: body `{"tool":"<name>","params":{...}}`. |
+| `POST /api/tool/call` | the same alias, served for the shipped omniagent `workbench` MCP plugin. |
+
+Status: `200` + `{"status":"ok","tool","result"}`; `400` +
+`{"error":{"kind":"invalid-params","violations":[...]}}` for a body that does
+not satisfy the schema (missing required, wrong type, unknown parameter) and
+`kind: "bad-request"` for a malformed body; `404` +
+`{"error":{"kind":"unknown-tool"}}`; `500` +
+`{"error":{"kind":"tool-failed"}}` when the handler throws - the process keeps
+serving. A validation failure is never a silent coercion and never a 500.
+
+```console
+$ curl -s http://127.0.0.1:12348/api/tools
+{"status":"ok","contract":"tools@1","count":1,"tools":[{"name":"hello greet","description":"greets one person: required name, optional greeting and times","plugin":"hello-tool","parameters":{"type":"object","properties":{"name":{"type":"string"},"greeting":{"type":"string"},"times":{"type":"integer"}},"required":["name"]}}]}
+
+$ curl -s -X POST http://127.0.0.1:12348/api/tools/hello%20greet -d '{"name":"Ada","times":2}'
+{"status":"ok","tool":"hello greet","result":{"message":"Hello, Ada! Hello, Ada!"}}
+
+$ curl -s -X POST http://127.0.0.1:12348/api/tools/hello%20greet -d '{}'
+{"status":"error","error":{"kind":"invalid-params","message":"invalid params for tool 'hello greet': name: missing required parameter","tool":"hello greet","violations":["name: missing required parameter"]}}
+
+$ curl -s -X POST http://127.0.0.1:12348/api/tool/call -d '{"tool":"hello greet","params":{"name":"Ada"}}'
+{"status":"ok","tool":"hello greet","result":{"message":"Hello, Ada!"}}
+
+$ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:12348/api/tools/nope
+404
+```
+
 ## CLI
 
 | Command | Description |
@@ -129,6 +170,8 @@ workbench: web UI on http://127.0.0.1:12348 (config <path>)
 | `workbench <command> [args...]` | Run the command registered by a plugin (longest match wins, the rest becomes args). |
 | `workbench plugins` | List loaded plugins, their source and their capabilities. |
 | `workbench commands` | List the registered commands (and the plugin that registered them). |
+| `workbench tools` | List the registered tools WITH their parameter schema and owning plugin. |
+| `workbench tool <name> ['<json params>']` | Invoke one tool through the same dispatch the HTTP routes use (`workbench tool 'hello greet' '{"name":"Ada"}'`); invalid params exit `2`, an unknown tool exits `1`. |
 | `workbench plugins --json` / `workbench commands --json` | Machine-readable variants. |
 | `--config <file>` | Use another config file; `.json`, `.yml` or `.yaml` (the extension selects the parser). |
 | `--port <n>` | `serve` only: status endpoint port (overrides `WORKBENCH_PORT`). |

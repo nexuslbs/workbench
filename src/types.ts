@@ -1,4 +1,5 @@
 import type { Context } from 'cordis'
+import type { ParameterSchemaSpec, ToolDefinition, ToolInfo } from './tools/definition.ts'
 
 /** Manifest file name, one per plugin directory. */
 export const MANIFEST_FILE = 'workbench.plugin.json'
@@ -263,6 +264,8 @@ export interface HostInventory {
   /** Every discovered plugin with its state (loaded, failed, disabled, available). */
   discovered: PluginDiscoveryInfo[]
   commands: CommandInfo[]
+  /** Every registered TOOL with the plugin that owns it and its parameter schema. */
+  tools: ToolInfo[]
 }
 
 /** The actions the host (loader) API exposes. */
@@ -389,6 +392,18 @@ export interface Workbench {
   /** Registers a command; returns the disposer that unregisters it again. */
   registerCommand(def: Omit<CommandDefinition, 'plugin'>): () => void
   commands(): CommandDefinition[]
+  /**
+   * Registers a TOOL: a unique name, a description, the parameters it expects
+   * (DSH-style map with `required: true` per property) and the handler to run
+   * once the params are validated. Returns the disposer that unregisters it.
+   */
+  registerTool(def: Omit<ToolDefinition, 'plugin' | 'schema'> & { parameters?: ParameterSchemaSpec }): () => void
+  /** Every registered tool with its parameter schema, sorted by name. */
+  tools(): ToolInfo[]
+  /** One registered tool definition, or undefined. */
+  tool(name: string): ToolDefinition | undefined
+  /** THE by-name dispatch: validate then run. Throws ToolUnknownError / ToolArgsError. */
+  executeTool(name: string, params?: unknown): Promise<unknown>
   /** Resolves argv to the longest matching command, the rest becomes args. */
   resolve(argv: string[]): { command: CommandDefinition; args: string[] } | undefined
   plugins(): LoadedPlugin[]

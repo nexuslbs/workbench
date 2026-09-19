@@ -51,6 +51,11 @@ export {
 // `npm run check:seam` enforces the direction Provider -> Definition <- Consumer.
 export * from './credentials/definition.ts'
 export { CORE_PROVIDERS, CORE_PROVIDER_IDS, registerCoreProviders, type CoreProvider } from './credentials/providers/index.ts'
+// The TOOLS capability: the definition (what a consumer plugin registers a named
+// tool with: name, description, parameter schema, handler) and the core HTTP
+// seam that exposes the registry by name (`POST /api/tools/<name>`).
+export * from './tools/definition.ts'
+export { registerToolRoutes, type ToolSource } from './tools/http.ts'
 // The WEB seam: the definition (what a UI plugin registers routes, assets and
 // pages with) plus the core `node:http` provider the composition root wires.
 export * from './web/definition.ts'

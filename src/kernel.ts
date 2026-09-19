@@ -9,6 +9,7 @@ import { Host } from './host.ts'
 import { loadPlugins, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { resolveSourceAuths } from './source-auth.ts'
 import { CommandRegistry } from './registry.ts'
+import { registerToolRoutes } from './tools/http.ts'
 import { WEB, DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, Web, type WebHandler } from './web/definition.ts'
 import { createWebServer, type WebServer } from './web/providers/http.ts'
 import type { ConfigApi, LoadedPlugin, Workbench, WorkbenchConfig } from './types.ts'
@@ -125,6 +126,12 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // that is the provider's job, started by `startWeb`.
   let web!: Web
   await ctx.plugin({ name: WEB, apply: (c) => { web = new Web(c) } })
+
+  // The by-name TOOL INVOCATION surface: the registered tools belong to the
+  // plugins, the routes are the core's contract for them. Registered here (the
+  // composition root) so a caller can discover and invoke tools through the web
+  // seam; the dispatch reads the live registry, so it follows load/unload.
+  registerToolRoutes(web, registry)
 
   // The credentials service: the definition's default implementation plus the
   // DECLARATIONS of the core providers (they are core modules, not plugins of a

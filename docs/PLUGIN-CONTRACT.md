@@ -300,6 +300,87 @@ manifest (`entry`, `capabilities` - e.g. `web:page:plugin-inventory`) and an
 entry module that registers its routes, assets and page. Removing it from the
 config leaves the server (and every other surface) working.
 
+## 4d. Tools capability (`ctx.workbench.registerTool`)
+
+A CONSUMER plugin may register a named **tool**: a unique name, a description,
+the parameters it expects (a small, JSON-Schema-compatible spec) and a handler.
+The core exposes the registered tools so ANY caller - an operator's `curl`, the
+CLI, another plugin in process - invokes one BY NAME with the parameters as the
+request body:
+
+```
+POST /api/tools/<name>      canonical: the JSON body IS the parameter object
+GET  /api/tools             every tool: name, description, plugin, parameters
+GET  /api/tools/<name>      one descriptor
+POST /api/tools             alias: {"tool": "<name>", "params": { ... }}
+POST /api/tool/call         the same alias, the shape the shipped omniagent
+                            `workbench` MCP plugin sends ({"tool","params"})
+```
+
+Workbench has NO model and NO agent loop: this is a name -> params -> handler
+invocation surface for consumers (plugins and operators), not a tool-calling
+feature for an LLM. No prompt assembly, no tool-result pruning, no policy guard
+in the core.
+
+Registration returns the disposer, so it is wrapped in `ctx.effect(...)` like
+every other registration:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Unique tool name, e.g. `hello greet`. A duplicate is REJECTED (fail-closed, never silently overwritten); unloading the owning plugin frees the name. In a URL the name is ONE percent-encoded path segment (`hello%20greet`). |
+| `description` | Human readable purpose, shown by `GET /api/tools` and `workbench tools`. |
+| `parameters` | What the tool expects, DSH-style: a per-property map of `{ type, description?, required?, enum?, items?, properties? }`, `required: true` marking a property required IN ITS PARENT. `type` is one of `string`/`number`/`integer`/`boolean`/`array`/`object`/`json`. Omitted/empty means no parameters (and then any key in the body is an `unknown parameter` violation). |
+| `handler(params)` | Runs with the VALIDATED parameters and returns the JSON-serialisable result (or a promise of it). It never sees an invalid body. |
+
+`parameters` compiles to plain JSON Schema (`parameterSchemaSpecToJsonSchema` -
+the shape `GET /api/tools` reports) and `validateArgs(spec, args)` returns
+human-readable, path-qualified violations (`name: missing required parameter`,
+`times: expected an integer, got string`, `nope: unknown parameter`).
+
+ONE dispatch function is the single entry point for invocation + validation
+(`ToolRegistry.execute`, reached as `ctx.workbench.executeTool`): the HTTP
+handlers, the CLI and any in-process caller all go through it and cannot drift.
+
+| Status | When |
+| --- | --- |
+| `200` | the handler ran; body `{ status: "ok", tool, result }`. |
+| `400` | the body did not satisfy the schema (`{ error: { kind: "invalid-params", violations: [...] } }`), or was not JSON (`kind: "bad-request"`) - never a silent coercion. |
+| `404` | no tool with that name is registered (`kind: "unknown-tool"`), including a tool whose plugin was unloaded or disabled. |
+| `500` | the handler itself threw (`kind: "tool-failed"`); the process stays up and keeps serving. |
+
+Ownership works exactly like commands/routes/assets: the inventory reports the
+owning plugin, and unloading or disabling the plugin disposes its tools with the
+rest of its registrations.
+
+Worked consumer example (the `hello-tool` plugin of the plugins repository):
+
+```js
+export function apply(ctx, config = {}) {
+  ctx.effect(() => ctx.workbench.registerTool({
+    name: 'hello greet',
+    description: 'greets one person: required name, optional greeting and times',
+    parameters: {
+      name: { type: 'string', description: 'who to greet', required: true },
+      greeting: { type: 'string', description: 'greeting word (default: Hello)' },
+      times: { type: 'integer', description: 'how many times to greet (default: 1)' },
+    },
+    handler: (params) => ({ message: [...Array(params.times ?? 1)].map(() => `${params.greeting ?? 'Hello'}, ${params.name}!`).join(' ') }),
+  }))
+}
+```
+
+```console
+$ curl -s -X POST http://127.0.0.1:12348/api/tools/hello%20greet -d '{"name":"Ada","times":2}'
+{"status":"ok","tool":"hello greet","result":{"message":"Hello, Ada! Hello, Ada!"}}
+```
+
+DSH provenance: the registration shape (`ctx.tools.register` + `defineTool` with
+a `ParameterSchemaSpec`), the compile step and `validateArgs` follow
+`deepseek-harness` `packages/core/tools/src/schema.ts` (`:449`, `:478`) and
+`packages/core/tools/src/index.ts` (`:789`). Deliberately NOT taken from DSH:
+prompt assembly, model-facing schemas, the agent loop, policy guards, scoped
+layers - workbench has no model.
+
 ## 5. How an external source is added
 
 The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /

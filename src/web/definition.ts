@@ -52,6 +52,12 @@ export interface WebRequest {
   method: string
   /** Request path without query string, e.g. `/api/plugin-inventory/plugins`. */
   path: string
+  /**
+   * Path parameters a DYNAMIC route captured (a `:name` segment), decoded by the
+   * provider; absent on an exact route. E.g. the route `POST /api/tools/:name`
+   * answers a request to `/api/tools/hello%20greet` with `{ name: 'hello greet' }`.
+   */
+  params?: Record<string, string>
   /** Parsed query string. */
   query: URLSearchParams
   /** Request headers, as received. */
@@ -73,16 +79,29 @@ export interface WebResponse {
 /** A route handler: returns a response, or nothing to fall through to the 404. */
 export type WebHandler = (request: WebRequest) => WebResponse | undefined | void | Promise<WebResponse | undefined | void>
 
-/** A route registration: one method + one exact path. */
+/**
+ * A route registration: one method + one path. The path is EXACT, or it may
+ * carry one or more WHOLE dynamic segments (`/api/tools/:name`); each `:name`
+ * segment captures exactly one request path segment, decoded by the provider
+ * (`/api/tools/hello%20greet` captures `hello greet`). An exact route always
+ * wins over a dynamic one.
+ */
 export interface WebRouteSpec {
   /** HTTP method (`GET`, `POST`, ...); case insensitive, stored upper case. */
   method: string
-  /** Absolute path, e.g. `/api/plugin-inventory/plugins`. */
+  /** Absolute path, e.g. `/api/plugin-inventory/plugins` or `/api/tools/:name`. */
   path: string
   /** The handler; everything it returns is served verbatim. */
   handler: WebHandler
   /** Human readable purpose, shown in the inventory. */
   description?: string
+}
+
+/** A registered dynamic route: its spec plus the segment pattern it matches. */
+interface DynamicRoute {
+  spec: WebRouteSpec
+  /** Path segments; a segment starting with `:` captures its request segment. */
+  segments: string[]
 }
 
 /** A registered route, as reported by {@link Web.routes}. */
@@ -186,6 +205,8 @@ export class Web extends Service {
   // Plain (runtime) properties, not `#private`: cordis wraps a service instance
   // in a Proxy for dependency tracking, and a Proxy breaks private-field access.
   protected routeMap = new Map<string, WebRouteSpec>()
+  /** Dynamic routes (a `:name` path segment), keyed exactly like the static ones. */
+  protected dynamicRoutes = new Map<string, DynamicRoute>()
   protected assetMap = new Map<string, WebAssetSpec>()
   protected pageMap = new Map<string, WebPageSpec>()
   /** Registration key -> plugin that made it (see {@link markApplying}). */
@@ -201,15 +222,37 @@ export class Web extends Service {
     return this.registrationCount
   }
 
-  /** Registers one route; returns the disposer that unregisters it. */
+  /** Registers one route (exact or dynamic); returns the disposer that unregisters it. */
   route(spec: WebRouteSpec): () => void {
     const method = typeof spec?.method === 'string' ? spec.method.trim().toUpperCase() : ''
     if (method.length === 0) throw new Error('web: a route needs a method (e.g. GET)')
     const path = normalizePath(spec?.path, `${method} route`)
     if (typeof spec?.handler !== 'function') throw new Error(`web: route ${method} ${path} needs a handler function`)
     const key = `${method} ${path}`
-    if (this.routeMap.has(key)) throw new Error(`web: route ${key} is already registered`)
     const entry: WebRouteSpec = { method, path, handler: spec.handler, ...(spec.description === undefined ? {} : { description: spec.description }) }
+    if (path.split('/').some((segment) => segment.startsWith(':'))) {
+      const segments = path.split('/')
+      const names = new Set<string>()
+      for (const segment of segments) {
+        if (!segment.startsWith(':')) continue
+        const name = segment.slice(1)
+        if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) {
+          throw new Error(`web: route ${method} ${path}: '${segment}' must be a whole path parameter segment (letters, digits, '_')`)
+        }
+        if (names.has(name)) throw new Error(`web: route ${method} ${path}: parameter ':${name}' is declared twice`)
+        names.add(name)
+      }
+      if (this.dynamicRoutes.has(key)) throw new Error(`web: route ${key} is already registered`)
+      this.dynamicRoutes.set(key, { spec: entry, segments })
+      this.owners.set(`route:${key}`, applyingPlugin())
+      return () => {
+        if (this.dynamicRoutes.get(key)?.spec === entry) {
+          this.dynamicRoutes.delete(key)
+          this.owners.delete(`route:${key}`)
+        }
+      }
+    }
+    if (this.routeMap.has(key)) throw new Error(`web: route ${key} is already registered`)
     this.routeMap.set(key, entry)
     this.owners.set(`route:${key}`, applyingPlugin())
     return () => {
@@ -284,14 +327,44 @@ export class Web extends Service {
     }))
   }
 
-  /** The registered routes, in registration order. */
+  /** The registered routes (exact and dynamic), in registration order. */
   routes(): WebRouteInfo[] {
-    return [...this.routeMap.values()].map((route) => ({
+    const specs = [
+      ...this.routeMap.values(),
+      ...[...this.dynamicRoutes.values()].map((route) => route.spec),
+    ]
+    return specs.map((route) => ({
       method: route.method,
       path: route.path,
       plugin: this.ownerOf(`route:${route.method} ${route.path}`),
       ...(route.description === undefined ? {} : { description: route.description }),
     }))
+  }
+
+  /**
+   * Matches a request path against the dynamic routes: the first route whose
+   * segments line up with the request path wins and its `:name` segments become
+   * the captured request params. Returns nothing when no dynamic route matched.
+   */
+  protected matchDynamic(method: string, path: string): { spec: WebRouteSpec; params: Record<string, string> } | undefined {
+    const parts = path.split('/')
+    for (const [key, route] of this.dynamicRoutes) {
+      if (!key.startsWith(`${method} `)) continue
+      if (route.segments.length !== parts.length) continue
+      const params: Record<string, string> = {}
+      let matches = true
+      for (let index = 0; index < route.segments.length; index++) {
+        const segment = route.segments[index] ?? ''
+        const value = parts[index] ?? ''
+        if (segment.startsWith(':')) params[segment.slice(1)] = value
+        else if (segment !== value) {
+          matches = false
+          break
+        }
+      }
+      if (matches) return { spec: route.spec, params }
+    }
+    return undefined
   }
 
   /** The plugin a registration key belongs to (`core` when unknown). */
@@ -315,15 +388,23 @@ export class Web extends Service {
   }
 
   /**
-   * The route dispatch a provider calls: it matches the registered routes and
-   * returns their response, or undefined when no route matched (the provider
-   * then answers 404). It never reads a file or writes to a socket.
+   * The route dispatch a provider calls: it matches the registered routes (an
+   * EXACT key first, then a dynamic `:name` route) and returns their response,
+   * or undefined when no route matched (the provider then answers 404). It never
+   * reads a file or writes to a socket.
    */
   async dispatch(request: WebRequest): Promise<WebResponse | undefined> {
-    const route = this.routeMap.get(`${request.method.toUpperCase()} ${request.path}`)
-    if (!route) return undefined
+    const method = request.method.toUpperCase()
+    const route = this.routeMap.get(`${method} ${request.path}`)
+    if (route) {
+      this.registrationCount += 1
+      const response = await route.handler(request)
+      return response ?? undefined
+    }
+    const matched = this.matchDynamic(method, request.path)
+    if (!matched) return undefined
     this.registrationCount += 1
-    const response = await route.handler(request)
+    const response = await matched.spec.handler({ ...request, method, params: matched.params })
     return response ?? undefined
   }
 }

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
 import { CREDENTIALS_CONTRACT, parseCredentialRef, refLabel } from './credentials/definition.ts'
 import { createKernel, type Kernel } from './kernel.ts'
+import { TOOLS_CONTRACT, ToolArgsError, ToolUnknownError } from './tools/definition.ts'
 import type { LoadedPlugin, PluginDiscoveryInfo } from './types.ts'
 import { DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, type WebHandler } from './web/definition.ts'
 
@@ -28,6 +29,12 @@ Usage:
   workbench <command> [args...]   run a command registered by a plugin
   workbench plugins               list loaded plugins and their sources
   workbench commands              list registered commands
+  workbench tools                 list registered tools with their parameter schemas
+  workbench tool <name> ['<params-json>']
+                                  invoke a tool by name through the same dispatch
+                                  as POST /api/tools/<name> (validation errors are
+                                  printed as violations; exit code 1 unknown tool,
+                                  2 invalid params)
   workbench credentials providers list the credentials providers (enabled / registered)
   workbench credentials list      list the credential names the enabled providers answer
   workbench credentials resolve <NAME[|SCOPE/NAME]>
@@ -450,6 +457,58 @@ async function main(): Promise<void> {
       if (!commands.length) process.stdout.write('no commands registered\n')
       for (const command of commands.sort((a, b) => a.name.localeCompare(b.name))) {
         process.stdout.write(`${command.name}${command.description ? `  ${command.description}` : ''}${command.plugin ? `  [${command.plugin}]` : ''}\n`)
+      }
+      return
+    }
+
+    if (head === 'tools') {
+      const tools = kernel.registry.tools()
+      if (flags.json) {
+        process.stdout.write(JSON.stringify({ contract: TOOLS_CONTRACT, tools }, null, 2) + '\n')
+        return
+      }
+      if (!tools.length) process.stdout.write('no tools registered\n')
+      for (const tool of tools) {
+        process.stdout.write(`${tool.name}${tool.description ? `  ${tool.description}` : ''}  [${tool.plugin}]\n`)
+        const required = new Set(tool.parameters?.required ?? [])
+        for (const [name, property] of Object.entries(tool.parameters?.properties ?? {})) {
+          const description = property.description ? `  ${property.description}` : ''
+          process.stdout.write(`    ${name}${required.has(name) ? ' (required)' : ''}: ${property.type}${description}\n`)
+        }
+      }
+      return
+    }
+
+    if (head === 'tool') {
+      const [, name, ...rest] = flags.rest
+      if (!name) throw new Error('tool: needs a tool name (workbench tool <name> [<params-json>])')
+      const raw = rest.join(' ').trim()
+      let params: unknown = {}
+      if (raw.length > 0) {
+        try {
+          params = JSON.parse(raw) as unknown
+        } catch (error) {
+          throw new Error(`tool ${name}: the parameters must be valid JSON (${error instanceof Error ? error.message : String(error)})`)
+        }
+      }
+      // THE dispatch: the CLI runs the very call the HTTP routes run (resolve,
+      // validate, then the handler), so the two surfaces cannot drift.
+      try {
+        const result = await kernel.registry.executeTool(name, params)
+        process.stdout.write(JSON.stringify({ status: 'ok', tool: name, result }, null, 2) + '\n')
+      } catch (error) {
+        if (error instanceof ToolArgsError) {
+          process.stderr.write(`${error.message}\n`)
+          for (const violation of error.violations) process.stderr.write(`  - ${violation}\n`)
+          process.exitCode = 2
+          return
+        }
+        if (error instanceof ToolUnknownError) {
+          process.stderr.write(`${error.message}\n`)
+          process.exitCode = 1
+          return
+        }
+        throw error
       }
       return
     }
