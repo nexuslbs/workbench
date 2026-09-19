@@ -38,9 +38,10 @@ export {
   type SourceAuthOptions,
   type GitHubAppTokenOptions,
 } from './source-auth.ts'
-// The credentials SERVICE DEFINITION (the contract, no provider vocabulary) and
-// the core PROVIDERS that ship with the core. An external provider implements
-// the definition; a consumer uses the definition. Neither may import the other:
+// The credentials SERVICE DEFINITION (the contract, no provider vocabulary).
+// The core ships NO provider - every provider is a PLUGIN (the public plugins
+// repo's `credentials-basic` is the default set). A provider implements the
+// definition; a consumer uses the definition. Neither may import the other:
 // `npm run check:seam` enforces the direction Provider -> Definition <- Consumer.
 export * from './credentials/definition.ts'
 // The TOOLS capability: the definition (what a consumer plugin registers a named

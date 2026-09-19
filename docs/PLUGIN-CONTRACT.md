@@ -184,8 +184,10 @@ returned string on stdout and exits non-zero for an unknown command.
 ## 4b. Credentials capability (`ctx.credentials`)
 
 Credentials are a **capability seam with three roles** (definition, provider,
-consumer) - see [CREDENTIALS.md](CREDENTIALS.md) for the full contract and the
-four core providers (`env`, `file`, `project-env`, `user-env`):
+consumer) - see [CREDENTIALS.md](CREDENTIALS.md) for the full contract. The core
+ships the DEFINITION ONLY: the four basic providers (`env`, `file`,
+`project-env`, `user-env`) live in the PLUGIN `credentials-basic` of the public
+plugins repository:
 
 - **Definition** (core, `src/credentials/definition.ts`, exported from
   `src/index.ts`): the typed contract, the `credentials@1` version, and the
@@ -674,17 +676,20 @@ sources:
     subdir: plugins
     auth:
       type: github-app
-      credential: GITHUB_APP_KEY   # resolved by the BOOTSTRAP credential set
+      credential: GITHUB_APP_KEY   # a NAME; a credentials provider plugin resolves it
       appId: 3967918
       installationId: 138119822
 ```
 
 Contract:
 
-- The credential is resolved BEFORE the fetch, by the BOOTSTRAP set (core
-  providers `env`, `file`, `project-env`, `user-env`, selected/ordered by
-  `credentials.bootstrap`) - never by a plugin-provided provider, because source
-  resolution happens before plugin discovery. See `docs/CREDENTIALS.md`.
+- The credential is resolved BEFORE the fetch, through the credentials service,
+  by a PROVIDER PLUGIN (the core ships none). The kernel therefore resolves the
+  credential-free sources first - that is where the provider plugin comes from
+  (e.g. the PUBLIC `plugins/credentials-basic`) - and only then resolves the
+  `auth` sources. A credential-dependent source with NO provider loaded is
+  DEFERRED (reported, no crash, no anonymous fetch); once a provider registers,
+  it becomes eligible in the same boot. See `docs/CREDENTIALS.md` section 6.
 - `type: token` (default) sends the value as a basic-auth `http.extraheader`;
   `type: github-app` treats the value as an App PRIVATE KEY (PEM) and mints a
   short-lived installation token (RS256 JWT -> `POST /app/installations/{id}/access_tokens`).

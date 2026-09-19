@@ -73,22 +73,43 @@ failure is never silently reported as "missing".
 
 Empty strings are treated as "not found" everywhere.
 
-## 2. The four core providers
+## 2. The four basic providers (plugin `credentials-basic`)
 
-All four live in `src/credentials/providers/` and are **core** implementations
-(an explicit operator decision for this capability). Each is a separate module;
-none of them is referenced by a consumer.
+The core ships **NO** credential provider: every provider is a PLUGIN (operator
+rule 2026-09-19, "the core must be minimal"). The four BASIC backends live in the
+plugin `credentials-basic` of the PUBLIC plugins repository
+(`nexuslbs/workbench-plugins`, `plugins/credentials-basic/`), each a separate
+module. The plugin holds NO secret value: it resolves a credential NAME against
+the environment / files at RUNTIME, which is why publishing it is safe - and why
+it can be fetched from a source that needs no credential at all (section 6).
+
+Because the provider is an external plugin, its four backends are configured in
+ONE config row, one optional sub-object per backend; an absent sub-object
+registers that backend with its DEFAULTS:
+
+```yaml
+plugins:
+  credentials-basic:
+    env: {}                              # the process environment
+    file: { path: ./credentials.json }   # one JSON credentials file
+    projectEnv: { dir: . }               # <dir>/.env
+    userEnv: { dir: /home/ci }           # the per-user scope
+```
 
 Every provider accepts a credential name in any of its candidate forms: the name
 as written, its ENV form (`deploy-token` -> `DEPLOY_TOKEN`) and its kebab form
 (`DEPLOY_TOKEN` -> `deploy-token`). The first matching form wins.
 
-| Provider id | Plugin name | Backend | Config (under `plugins:<plugin name>`) |
-| --- | --- | --- | --- |
-| `env` | `credentials-env` | the direct process environment (`process.env`) | none (unknown keys are an error) |
-| `file` | `credentials-file` | one credentials file: a JSON or YAML mapping of names to values; a nested mapping is a SCOPE namespace | `path` (default `credentials.json` next to the config file), `format` (`json` \| `yaml`, default by extension) |
-| `project-env` | `credentials-project-env` | the PROJECT level env file (dotenv syntax) | `dir` (default: the config file directory), `file` (default `<dir>/.env`; wins over `dir`) |
-| `user-env` | `credentials-user-env` | the USER level env file (dotenv syntax) | `dir` (default: `$HOME`, then the OS home), `file` (default `<dir>/.env`; wins over `dir`) |
+| Provider id | Backend | Config (under `plugins.credentials-basic`) |
+| --- | --- | --- |
+| `env` | the direct process environment (`process.env`) | none (unknown keys are an error) |
+| `file` | one credentials file: a JSON mapping of names to values; a nested mapping is a SCOPE namespace | `path` (default `credentials.json` next to the config file) |
+| `project-env` | the PROJECT level env file (dotenv syntax) | `dir` (default: the config file directory), `file` (default `<dir>/.env`; wins over `dir`) |
+| `user-env` | the USER level env file (dotenv syntax) | `dir` (default: `$HOME`, then the OS home), `file` (default `<dir>/.env`; wins over `dir`) |
+
+Each backend declares its provider id in the plugin manifest
+(`{"id": "credentials", "version": 1, "provider": "env"}`, ...), which is what
+lets the core accept the registration.
 
 Semantics that are easy to get wrong, pinned by tests:
 
@@ -119,7 +140,7 @@ DSH page states a rule explicitly, this document should be corrected to match it
 credentials:
   # Enabled providers, IN PRECEDENCE ORDER (first answering wins).
   # Omitted/empty = every declared provider, in declaration order
-  # (core first: env, file, project-env, user-env; then externals).
+  # (credentials-basic declares env, file, project-env, user-env; then others).
   providers: [env, file]
   # Default scope for unscoped references (a FALLBACK, see section 4).
   scope: team
@@ -299,38 +320,45 @@ must name the endpoint and the reference, never the value (section 4). Keep real
 tokens in the provider's own configuration as `${env:VAR}` / `${cred:NAME}`
 references; never commit them.
 
-## Private plugin sources: source auth + the BOOTSTRAP credential set
+## 6. Private plugin sources: source auth and the credentials-provider GATE
 
 `kind: git` sources may declare `auth`: a credential REFERENCE (a name), never a
-value. The value is resolved by the **bootstrap credential set** and is used
+value. The value is resolved through the credentials service and is used
 TRANSIENTLY for that one fetch.
 
-### Why a bootstrap set (source fetch happens BEFORE plugin discovery)
+### The GATE: a credential-dependent entry loads only after a provider is loaded
 
-`createKernel` resolves sources (and their auth) BEFORE it discovers any plugin
-(`src/kernel.ts`: the source walk runs first, and the credentials-provider plugins
-are only found in that same walk). A credential needed to FETCH a source therefore
-cannot come from a plugin-provided provider: that provider is itself discovered in
-a source. `src/credentials/providers/bootstrap.ts` closes the gap by instantiating the CORE
-provider modules (`env`, `file`, `project-env`, `user-env`) DIRECTLY, with no
-cordis context and no plugin, from the same `plugins.<provider>` config sections.
-It speaks the very same `CredentialConsumer` contract (`resolve`/`explain`/`list`)
-that `ctx.credentials` implements, so a consumer never knows which of the two it
-talks to.
+An entry - a SOURCE or a PLUGIN roster row - whose config uses `${cred:...}` (or a
+source `auth:`) implicitly DEPENDS on the credentials service provider: a plugin
+that implements the `credentials@1` service definition and registers a provider
+The core ships NO provider, so such an entry is **DEFERRED**:
 
-Layering (both halves are the same Definition; only availability differs):
+1. The loader walks the sources and loads every source that needs NO credential -
+   that is where a credentials provider plugin comes from.
+2. A source or plugin row that needs a credential is DEFERRED: it is reported
+   (`... is DEFERRED: its config needs a credential ... but no plugin implementing
+   credentials@1 is loaded yet`) and the boot COMPLETES with zero plugins loaded.
+   No crash, no silent skip, no anonymous fetch.
+3. As soon as a plugin has registered a provider (`ctx.credentials.register`), the
+   deferred entries become ELIGIBLE and are resolved in the SAME boot through the
+   live credentials service.
 
-| Layer | Made of | Available | Used by |
+That is what breaks the bootstrap chicken-and-egg: the provider implementation
+lives in the PUBLIC plugins repository, is fetchable from a remote source that
+needs no credential, and only after it is loaded do the `${cred:...}` sources and
+plugin rows become loadable.
+
+PRECEDENCE RULE (binding): credential-free sources and plugin rows resolve first;
+credential-dependent entries resolve as soon as a provider is registered in the
+same boot. A provider plugin MUST therefore be reachable from a source that needs
+no credential (a `path` source, the PUBLIC `git` source, or a private source whose
+OWN credential is already resolvable). `credentials.bootstrap` no longer exists:
+selection is `credentials.providers` alone (section 3).
+
+| Phase | Made of | Available | Used by |
 | --- | --- | --- | --- |
-| bootstrap set | CORE providers only, no plugins, no cordis | before any plugin is loaded | `git` source auth (fetch), the loader/host |
-| `ctx.credentials` | core + plugin-provided providers, selected by `credentials.providers` | after plugins load | config `${cred:NAME}` expansion, plugins |
-
-Selection is configuration: `credentials.bootstrap` lists the core provider ids in
-precedence order (default: all four, in declaration order). Only CORE ids are
-accepted - an unknown id (including a plugin provider id, which cannot exist yet)
-is a loud config error, never a silent fallback. When the bootstrap set yields
-nothing, the source is reported as a per-source error and the loader SKIPS it: the
-other sources still load, and no anonymous fetch is attempted.
+| 1 - credential-free sources | `path`/`git` sources with no `auth` | at boot, before any plugin | fetching the credentials provider plugin |
+| 2 - gated entries | provider plugins registered on `ctx.credentials`, selected by `credentials.providers` | once a provider is registered | `git` source auth (fetch), config `${cred:NAME}` expansion, plugins |
 
 ### git source auth
 
@@ -343,7 +371,7 @@ sources:
     subdir: plugins                # optional, unchanged
     auth:
       type: github-app             # or `token` (default)
-      credential: GITHUB_APP_KEY   # a NAME, resolved by the bootstrap set
+      credential: GITHUB_APP_KEY   # a NAME; the credentials provider plugin resolves it
       appId: 3967918               # github-app: the App id (not a secret)
       installationId: 138119822    # github-app: the installation (not a secret)
       # apiBase: https://api.github.com   # GitHub Enterprise
@@ -375,3 +403,10 @@ NEVER version a key. The key material is operator-provided at runtime: an export
 env var (`export GITHUB_APP_KEY=...`, resolved by the `env` provider), a
 `credentials.json` next to the config file (the `file` provider), or a mounted
 secret file - and the config references it BY NAME only.
+
+NOTE (verified 2026-09-19): a PEM credential must reach the provider with REAL
+newlines. The `file` provider (a JSON document) carries them naturally; a dotenv
+file cannot carry an escaped `\n` (the basic dotenv parser is single-line), so for
+a private key prefer the `file` provider or a real multi-line env var. An INDENTED
+PEM block is also rejected by the DER decoder: the base64 lines must not be padded
+with spaces.

@@ -112,10 +112,11 @@ export interface LoadedPlugin {
 
 /**
  * Authentication for a `git` source. The config carries a credential REFERENCE
- * (a name), never a value: the value is resolved at FETCH time by the BOOTSTRAP
- * credential set (`src/credentials/providers/bootstrap.ts`), which is available BEFORE any
- * plugin is loaded, and is used TRANSIENTLY - it is never written into the
- * checkout, the remote url or a log.
+ * (a name), never a value: the value is resolved at FETCH time through the
+ * credentials service, by a PROVIDER PLUGIN (the core ships none) that the
+ * kernel loaded from a credential-free source first. A source whose credential
+ * has no provider yet is DEFERRED, and the value is used TRANSIENTLY - it is
+ * never written into the checkout, the remote url or a log.
  */
 export interface SourceAuthSpec {
   /**

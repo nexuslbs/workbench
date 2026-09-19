@@ -25,10 +25,11 @@ sources: []
   #   subdir: plugins
 
   # 3. PRIVATE git source WITH CREDENTIALS: `auth.credential` is a credential
-  #    REFERENCE BY NAME, never a value. It is resolved by the BOOTSTRAP
-  #    credential set (core providers, no plugin) BEFORE any plugin loads, so a
-  #    private source is fetchable at boot. See docs/CREDENTIALS.md
-  #    ("Private plugin sources: source auth + the BOOTSTRAP credential set").
+  #    REFERENCE BY NAME, never a value. It is resolved through the credentials
+  #    service by a PROVIDER PLUGIN - the core ships none, so name a
+  #    `credentials-basic:` row (or another provider plugin) from a source that
+  #    needs no credential; a credential-dependent source with no provider loaded
+  #    is DEFERRED. See docs/CREDENTIALS.md section 6 ("Private plugin sources").
   # - kind: git
   #   id: workbench-plugins-private
   #   url: https://github.com/nexuslbs/workbench-plugins-private

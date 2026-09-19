@@ -2,12 +2,15 @@
  * SOURCE AUTHENTICATION: turning a credential REFERENCE in the config into a
  * TRANSIENT git auth argument for a private `git` source.
  *
- * Why a bootstrap path (and not `ctx.credentials`): a source is fetched BEFORE
- * any plugin is discovered, so the provider that answers must exist without a
- * plugin. The caller injects the BOOTSTRAP credential set
- * (`src/credentials/providers/bootstrap.ts`, core providers only) as a
- * {@link CredentialConsumer} - the same contract `ctx.credentials` implements -
- * so this module never names a provider and never depends on plugin loading.
+ * Why the caller injects a {@link CredentialConsumer}: a source is fetched
+ * BEFORE any plugin is discovered and the core ships NO credential provider
+ * (operator rule: the core is minimal), so the KERNEL resolves in two phases: it
+ * fetches the credential-free sources first (that is where a credentials provider
+ * PLUGIN comes from), and only once a provider has been registered does it
+ * resolve an `auth` source through the live credentials service
+ * (`ctx.credentials`), which satisfies this interface. This module therefore never
+ * names a provider and never depends on plugin loading; a credential-dependent
+ * source with no provider loaded is DEFERRED instead.
  *
  * Two credential TYPES:
  * - `token` (default): the credential value IS the token (a PAT, a GitHub App
@@ -41,7 +44,7 @@ export const TOKEN_SKEW_MS = 5 * 60 * 1000
 export const DEFAULT_USERNAME = 'x-access-token'
 
 export interface SourceAuthOptions {
-  /** The bootstrap credential set; without it an `auth` source cannot be fetched. */
+  /** The credentials consumer the kernel injects; without one an `auth` source is DEFERRED. */
   credentials?: CredentialConsumer
   /** Injectable fetch (tests); defaults to the global fetch. */
   fetchImpl?: typeof fetch

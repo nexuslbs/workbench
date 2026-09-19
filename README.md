@@ -272,9 +272,11 @@ entry there):
 
 Workbench serves credentials through a three-role capability seam: a **Service
 Definition** (the contract, in the core), one or more **Service Providers**
-(implementations), and **Consumers** (config values, the CLI, plugins). The four
-core providers are `env`, `file`, `project-env` and `user-env`; any further
-provider is an external plugin. Full description: [docs/CREDENTIALS.md](docs/CREDENTIALS.md).
+(every one an external plugin - the core ships NONE), and **Consumers** (config
+values, the CLI, plugins). The four basic backends `env`, `file`, `project-env`
+and `user-env` come from the plugin `credentials-basic` in the public plugins
+repository; a `${cred:...}` source or plugin is loaded only after a provider
+plugin is loaded. Full description: [docs/CREDENTIALS.md](docs/CREDENTIALS.md).
 
 Config values may reference a credential by NAME, resolved through the
 credentials service:
@@ -313,25 +315,28 @@ and errors name the reference, never the value.
 ## Layout
 
 ```
-workbench/
+workbench/                       the KERNEL: no plugin, no feature module
   src/
     cli.ts        CLI entrypoint (npm run dev)
-    credentials/  the credentials capability: definition (contract) + 4 core providers
-    kernel.ts     boot: cordis root context + workbench service + load
+    credentials/  the credentials capability: the DEFINITION only (no provider)
+    kernel.ts     boot: cordis root context + workbench service + load + ${cred:} gate
     loader.ts     plugin discovery + manifest validation + import + ctx.plugin
     registry.ts   the workbench service (commands + plugins)
-    sources.ts    source resolution (path + git cache)
+    sources.ts    source resolution (path + git cache; auth is a credential REF)
+    source-auth.ts  a credential ref -> a TRANSIENT git auth argument
+    web/          the web seam: definition + the node:http server the core wires
     config.ts     JSON/YAML config reading, default-file lookup, ${env:VAR} expansion
     types.ts      manifest / command / plugin / config types + the ctx.workbench type
-  plugins/
-    hello-world/  core test plugin (loaded through the plugin-source mechanism)
   test/
     kernel.test.ts  load-and-run tests, incl. CLI end to end and `serve`
     fixtures.ts     temp external-plugin fixture (no sibling checkout needed)
-  workbench.config.yml          default config (core-only YAML, external EXAMPLE commented out)
-  workbench.config.example.yml  the same core-only config (for `--config`)
+  workbench.config.yml          default config: ZERO sources, ZERO plugins
+  workbench.config.example.yml  the same, with the source shapes commented out
   docs/PLUGIN-CONTRACT.md
 ```
+
+Every plugin - including the test ones the core's own tests use - lives in the
+external `nexuslbs/workbench-plugins` repository (`plugins/`), never here.
 
 ## Plugins
 

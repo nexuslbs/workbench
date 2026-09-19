@@ -376,11 +376,12 @@ export class Credentials extends CredentialsService {
 
 /**
  * The CONSUMER slice of the capability: what a consumer is allowed to call.
- * {@link CredentialsService} satisfies it structurally, and so does the core's
- * BOOTSTRAP set (`src/credentials/providers/bootstrap.ts`), which is built WITHOUT a cordis
- * context because it must answer before any plugin is loaded (a `git` source is
- * fetched before plugin discovery). A consumer depends on this interface - never
- * on a provider.
+ * {@link CredentialsService} satisfies it structurally (that is what
+ * `ctx.credentials` is), and it is the interface the kernel injects when it
+ * resolves a gated source: the core ships NO provider, so source auth is only
+ * attempted once a provider PLUGIN has registered, and a credential-dependent
+ * source with no provider loaded is DEFERRED. A consumer depends on this
+ * interface - never on a provider.
  */
 export interface CredentialConsumer {
   /** Resolves a reference through the enabled providers (first answering wins). */
