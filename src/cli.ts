@@ -1,12 +1,10 @@
 #!/usr/bin/env node
-import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
 import { CREDENTIALS_CONTRACT, parseCredentialRef, refLabel } from './credentials/definition.ts'
 import { createKernel, type Kernel } from './kernel.ts'
-import { TOOLS_CONTRACT, ToolArgsError, ToolUnknownError } from './tool-registry.ts'
-import type { WebSeam } from './tool-routes.ts'
+import type { WebSeam } from './web-seam.ts'
 import type { LoadedPlugin, PluginDiscoveryInfo } from './types.ts'
 
 /**
@@ -24,13 +22,11 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** Directory of the core package, the fallback location of the default config. */
 const CORE_DIR = path.resolve(HERE, '..')
 
-/** Default port of the `serve` status endpoint (published by the dev overlay). */
-export const DEFAULT_PORT = 12347
-
 /**
- * Default bind port of the `web@1` PROVIDER PLUGIN (`web-impl`). The core keeps no
- * listener of its own; this number is used ONLY to decide whether that plugin
- * binds the service port too (so the core status listener stays off it).
+ * Default bind port of the `web@1` PROVIDER PLUGIN (`web-impl`). The core keeps NO
+ * listener of its own (operator rule 2026-09-19): it publishes the resolved port
+ * into the environment (`WORKBENCH_PORT` / `WORKBENCH_WEB_PORT`) and the provider
+ * plugin binds it; with no provider plugin loaded, nothing listens at all.
  */
 export const WEB_PROVIDER_DEFAULT_PORT = 12348
 
@@ -41,13 +37,16 @@ const HELP = `workbench - minimal cordis plugin host
 
 Usage:
   workbench serve [--port <n>]    boot the plugins and keep running (service mode;
-                                  the Web UI is served by the web provider plugin)
+                                  EVERY listener - the Web UI AND /health - is
+                                  bound by the web@1 provider plugin)
   workbench web [--port <n>]      boot the plugins, report the web state and keep
                                   running (the UI listener belongs to the plugin)
   workbench <command> [args...]   run a command registered by a plugin
   workbench plugins               list loaded plugins and their sources
   workbench commands              list registered commands
   workbench tools                 list registered tools with their parameter schemas
+                                  (a command of the TOOLS plugin - the core ships
+                                  no tool module and no /api/tools route)
   workbench tool <name> ['<params-json>']
                                   invoke a tool by name through the same dispatch
                                   as POST /api/tools/<name> (validation errors are
@@ -65,9 +64,11 @@ Options:
   --config <file>  config file to use; .json, .yml or .yaml (default: the first of
                    ${DEFAULT_CONFIG_FILES.join(', ')}
                    in the working directory, then next to the core)
-  --port <n>       serve: status endpoint port (default: $WORKBENCH_PORT or ${DEFAULT_PORT});
-                   web: Web UI port used by the web provider plugin (default:
-                   $WORKBENCH_WEB_PORT, the config, else ${WEB_PROVIDER_DEFAULT_PORT})
+  --port <n>       the port the web provider plugin binds; the core itself
+                   binds NO port and exports the value as $WORKBENCH_PORT
+                   (web: as $WORKBENCH_WEB_PORT). Plugin default:
+                   $WORKBENCH_WEB_PORT / $WORKBENCH_PORT / the config, else
+                   ${WEB_PROVIDER_DEFAULT_PORT}
   --host <h>       Web UI listener host read by the web provider plugin
                    (default: $WORKBENCH_WEB_HOST, the config, else 127.0.0.1)
   --web-port <n>   serve only: Web UI port when the config enables the UI;
@@ -80,7 +81,9 @@ Options:
 Environment:
   CONFIG_FILE      config file to use when --config is not given; empty/unset
                    falls back to the default config file lookup described above
-  WORKBENCH_PORT   serve only: status endpoint port (default: ${DEFAULT_PORT})
+  WORKBENCH_PORT   serve only: the port a web provider plugin binds (read by
+                   THAT PLUGIN; the core binds no port, so with no provider
+                   plugin loaded nothing listens)
   WORKBENCH_WEB_HOST / WORKBENCH_WEB_PORT
                    Web UI listener WHEN a web provider plugin (web-impl) is
                    loaded; the default host is 127.0.0.1 (loopback - the UI has
@@ -146,32 +149,16 @@ function resolveConfigFile(flags: Flags): string {
   return findDefaultConfigFile([...new Set([process.cwd(), CORE_DIR])])
 }
 
-/** Serve port resolution order: `--port` flag, `WORKBENCH_PORT`, then the default. */
-function resolvePort(flags: Flags): number {
-  if (flags.port !== undefined) return flags.port
-  const fromEnv = process.env.WORKBENCH_PORT?.trim()
-  if (fromEnv) {
-    const port = Number(fromEnv)
-    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`WORKBENCH_PORT must be a port number (0-65535), got '${fromEnv}'`)
-    return port
-  }
-  return DEFAULT_PORT
-}
-
 /**
- * Web port resolution order: `--port`/`--web-port`, `WORKBENCH_WEB_PORT`, the
- * config, then the default of the `web@1` provider. The core uses it to know
- * whether the provider plugin BINDS the status port (it must not bind it too).
+ * Ports are the WEB PROVIDER PLUGIN's business (the core binds no listener): the
+ * CLI flags are published into the environment the provider plugin reads
+ * (`WORKBENCH_PORT` / `WORKBENCH_WEB_PORT`), exactly like a deployment does. The
+ * precedence among plugin row, these variables and the definition default lives
+ * inside the plugin, so the core never resolves or binds a port.
  */
-function resolveWebPort(explicit: number | undefined, fromConfig: number | undefined): number {
-  if (explicit !== undefined) return explicit
-  const fromEnv = process.env.WORKBENCH_WEB_PORT?.trim()
-  if (fromEnv) {
-    const port = Number(fromEnv)
-    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`WORKBENCH_WEB_PORT must be a port number (0-65535), got '${fromEnv}'`)
-    return port
-  }
-  return fromConfig ?? WEB_PROVIDER_DEFAULT_PORT
+function publishPortEnv(flags: Flags): void {
+  if (flags.port !== undefined) process.env.WORKBENCH_PORT = String(flags.port)
+  if (flags.webPort !== undefined) process.env.WORKBENCH_WEB_PORT = String(flags.webPort)
 }
 
 function describePlugin(plugin: LoadedPlugin): string {
@@ -291,78 +278,33 @@ async function credentialsCommand(kernel: Kernel, flags: Flags): Promise<void> {
 
 
 /**
- * Long-running entrypoint used by the compose service: boots the kernel, serves
- * a tiny status endpoint (`GET /health` -> the loaded plugins and sources) and
- * stays up until SIGINT/SIGTERM. Keeping the process alive is the whole point -
- * a container that only sleeps would report `Up` while hosting nothing.
+ * Long-running entrypoint used by the compose service: boots the plugins and
+ * stays up until SIGINT/SIGTERM. The CORE HOLDS NO LISTENER (operator rule
+ * 2026-09-19): every HTTP surface - `/health` included - is bound by the `web@1`
+ * PROVIDER PLUGIN the config loads, so this function reports the observed state
+ * and keeps the process alive instead of binding anything. Keeping the process
+ * alive is the whole point - a container that only sleeps would report `Up`
+ * while hosting nothing.
+ *
+ * `kernel.webState` says what this deployment got:
+ *   served   -> a provider plugin is loaded and owns the port; it answers
+ *               /health from the same live inventory;
+ *   deferred -> the config asks for the web UI but no provider plugin is
+ *               loaded: structured deferral (loud log line + the `web` state in
+ *               the inventory), no crash, no silent skip, NO port bound;
+ *   off      -> nothing was asked for, no port bound.
  */
-async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> {
-  // The WEB capability is served by a PROVIDER PLUGIN from an external source:
-  // the core ships no seam and no listener. `kernel.webState` reports what this
-  // deployment got:
-  //   served   -> the provider plugin owns its port and answers /health there
-  //               (from the same live inventory), so the core must NOT bind it;
-  //   deferred -> the config asks for the web UI but no provider plugin is
-  //               loaded: structured deferral, no crash, no silent skip;
-  //   off      -> nothing was asked for.
+async function serve(kernel: Kernel): Promise<void> {
   const webState = kernel.webState
-  const webConfig = kernel.config.web ?? {}
-  const webPort = resolveWebPort(flags.webPort, webConfig.port)
-  // Does the CORE own the published port? Only when no provider plugin serves
-  // it: with `served` the plugin binds the port itself, and a second listener on
-  // it would be an EADDRINUSE crash.
-  const coreOwnsPort = webState.state !== 'served' || webPort !== port
-  const status = (): string =>
-    JSON.stringify(
-      {
-        status: 'ok',
-        pid: process.pid,
-        uptimeSeconds: Math.round(process.uptime()),
-        configFile: kernel.configFile,
-        plugins: kernel.plugins,
-        sources: kernel.sources,
-        failures: kernel.failures,
-        web: webState,
-      },
-      null,
-      2,
-    )
-
-  // Where the deployment IS served, the provider PLUGIN writes its own line
-  // ([web-impl] serving web@1 on http://...); the core reports the state it
-  // observed instead of owning a listener it no longer has.
   if (webState.state === 'served') {
     process.stdout.write(
       `workbench: web served by plugin '${webState.plugin}' (provider '${webState.provider}', ` +
-        `${webState.external ? 'external:' : ''}${webState.source}) on port ${webPort}` +
-        `${coreOwnsPort ? `; the core status endpoint stays on ${port}` : ' (this process hosts no web listener of its own)'}\n`,
+        `${webState.external ? 'external:' : ''}${webState.source}); this process binds no port of its own\n`,
     )
   } else if (webState.state === 'deferred') {
     process.stdout.write(`workbench: web is DEFERRED - ${webState.reason}\n`)
-  }
-
-  /** The plain status listener: the JSON status on `/health`, `/` and `/?...`. */
-  const handleStatus = (request: http.IncomingMessage, response: http.ServerResponse): void => {
-    const url = request.url ?? '/'
-    if (url === '/health' || url === '/' || url.startsWith('/?')) {
-      response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(status() + '\n')
-      return
-    }
-    response.writeHead(404, { 'content-type': 'application/json' })
-    response.end(JSON.stringify({ status: 'not found', path: url }) + '\n')
-  }
-
-  // The plain status listener runs only when the CORE owns the port (no web
-  // provider plugin, or the provider was pointed at a different port).
-  const server = coreOwnsPort ? http.createServer(handleStatus) : undefined
-
-  if (server) {
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(port, '0.0.0.0', resolve)
-    })
-    process.stdout.write(`workbench: serving on http://0.0.0.0:${port} config=${kernel.configFile}\n`)
+  } else {
+    process.stdout.write('workbench: web state=off - no web@1 provider plugin is loaded and this process binds no port\n')
   }
   process.stdout.write(summaryLine(kernel) + '\n')
   for (const source of kernel.sources) process.stdout.write(describeSource(source) + '\n')
@@ -370,10 +312,13 @@ async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> 
   process.stdout.write(credentialsLines(kernel, false) + '\n')
   for (const failure of kernel.failures) process.stdout.write(`  failed ${failure.plugin} (${failure.source}): ${failure.error}\n`)
 
+  // The heartbeat is deliberately NOT unref'd: with no `web@1` provider plugin
+  // the core binds NO socket, so this interval is the one handle that keeps the
+  // process (and the loaded plugins) alive until SIGINT/SIGTERM. Unref'ing it
+  // made `serve` exit right after boot once the core stopped owning a listener.
   const heartbeat = setInterval(() => {
     process.stdout.write(`workbench: alive (pid ${process.pid}, uptime ${Math.round(process.uptime())}s, ${kernel.plugins.length} plugin(s))\n`)
   }, HEARTBEAT_MS)
-  heartbeat.unref()
 
   await new Promise<void>((resolve) => {
     const stop = (signal: NodeJS.Signals): void => {
@@ -384,7 +329,6 @@ async function serve(kernel: Kernel, flags: Flags, port: number): Promise<void> 
     process.once('SIGTERM', stop)
   })
   clearInterval(heartbeat)
-  if (server) await new Promise<void>((resolve) => server.close(() => resolve()))
 }
 
 /**
@@ -412,12 +356,16 @@ async function web(kernel: Kernel, flags: Flags): Promise<void> {
   } else {
     process.stdout.write('seam: not provided - no web@1 provider plugin is loaded\n')
   }
-  await serve(kernel, flags, resolvePort(flags))
+  await serve(kernel)
 }
 
 async function main(): Promise<void> {
   const flags = parseArgs(process.argv.slice(2))
   const [head] = flags.rest
+  // The core binds NO port: `--port` / `--web-port` belong to the web provider
+  // plugin, so they are exported into the environment it reads - the same way a
+  // deployment sets WORKBENCH_PORT.
+  publishPortEnv(flags)
   if (!head || head === 'help' || head === '--help') {
     process.stdout.write(HELP)
     return
@@ -426,7 +374,7 @@ async function main(): Promise<void> {
   if (head === 'serve') {
     const kernel = await createKernel({ configFile: resolveConfigFile(flags), includeExternal: flags.includeExternal })
     try {
-      await serve(kernel, flags, resolvePort(flags))
+      await serve(kernel)
     } finally {
       await kernel.dispose()
     }
@@ -470,57 +418,11 @@ async function main(): Promise<void> {
       return
     }
 
-    if (head === 'tools') {
-      const tools = kernel.registry.tools()
-      if (flags.json) {
-        process.stdout.write(JSON.stringify({ contract: TOOLS_CONTRACT, tools }, null, 2) + '\n')
-        return
-      }
-      if (!tools.length) process.stdout.write('no tools registered\n')
-      for (const tool of tools) {
-        process.stdout.write(`${tool.name}${tool.description ? `  ${tool.description}` : ''}  [${tool.plugin}]\n`)
-        const required = new Set(tool.parameters?.required ?? [])
-        for (const [name, property] of Object.entries(tool.parameters?.properties ?? {})) {
-          const description = property.description ? `  ${property.description}` : ''
-          process.stdout.write(`    ${name}${required.has(name) ? ' (required)' : ''}: ${property.type}${description}\n`)
-        }
-      }
-      return
-    }
-
-    if (head === 'tool') {
-      const [, name, ...rest] = flags.rest
-      if (!name) throw new Error('tool: needs a tool name (workbench tool <name> [<params-json>])')
-      const raw = rest.join(' ').trim()
-      let params: unknown = {}
-      if (raw.length > 0) {
-        try {
-          params = JSON.parse(raw) as unknown
-        } catch (error) {
-          throw new Error(`tool ${name}: the parameters must be valid JSON (${error instanceof Error ? error.message : String(error)})`)
-        }
-      }
-      // THE dispatch: the CLI runs the very call the HTTP routes run (resolve,
-      // validate, then the handler), so the two surfaces cannot drift.
-      try {
-        const result = await kernel.registry.executeTool(name, params)
-        process.stdout.write(JSON.stringify({ status: 'ok', tool: name, result }, null, 2) + '\n')
-      } catch (error) {
-        if (error instanceof ToolArgsError) {
-          process.stderr.write(`${error.message}\n`)
-          for (const violation of error.violations) process.stderr.write(`  - ${violation}\n`)
-          process.exitCode = 2
-          return
-        }
-        if (error instanceof ToolUnknownError) {
-          process.stderr.write(`${error.message}\n`)
-          process.exitCode = 1
-          return
-        }
-        throw error
-      }
-      return
-    }
+    // `workbench tools` / `workbench tool <name>` are NOT core commands any
+    // more: the whole tools capability lives in the PUBLIC
+    // nexuslbs/workbench-plugins repo, whose `tools-impl` plugin registers these
+    // two commands through the command registry. With that plugin loaded they
+    // work exactly as before; without it they are simply not registered.
 
     if (head === 'credentials') {
       await credentialsCommand(kernel, flags)

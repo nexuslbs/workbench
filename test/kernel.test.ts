@@ -139,7 +139,7 @@ test('CLI: CONFIG_FILE selects the config file, an empty value keeps the default
   }
 })
 
-test('CLI: serve keeps running and answers its status endpoint', async () => {
+test('CLI: serve keeps running and binds NO port of its own (the server is a plugin)', async () => {
   const fixture = externalFixture()
   const port = 20000 + Math.floor(Math.random() * 20000)
   const child = spawn(process.execPath, ['src/cli.ts', 'serve', '--port', String(port)], {
@@ -151,24 +151,24 @@ test('CLI: serve keeps running and answers its status endpoint', async () => {
   child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString() })
   child.stderr.on('data', (chunk: Buffer) => { output += chunk.toString() })
   try {
-    let status: { status?: string; configFile?: string; plugins?: { name: string }[] } | undefined
-    for (let attempt = 0; attempt < 50 && !status; attempt++) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/health`)
-        status = (await response.json()) as typeof status
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 100))
-      }
-    }
-    assert.ok(status, `serve never answered /health; output:\n${output}`)
-    assert.equal(status.status, 'ok')
-    assert.equal(status.configFile, fixture.yml)
-    assert.deepEqual(status.plugins?.map((plugin) => plugin.name).sort(), ['hello-otherworld', 'hello-world'])
+    // No `web@1` provider plugin is configured here, so the core - config load,
+    // source discovery, plugin install - must NOT bind a listener: the server is
+    // always a plugin. The process still stays UP and reports the state.
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    await assert.rejects(
+      fetch(`http://127.0.0.1:${port}/health`),
+      'the core must not bind a port when no web@1 provider plugin is loaded',
+    )
     assert.equal(child.exitCode, null, `serve must stay up, but it exited; output:\n${output}`)
-    assert.match(output, /serving on http:\/\/0\.0\.0\.0:/)
+    assert.match(output, /workbench: web (is DEFERRED|state=off)/, `serve reports the structured web state; output:\n${output}`)
+    assert.match(output, /this process binds no port|is DEFERRED/, `serve reports it hosts no listener; output:\n${output}`)
+    assert.match(output, /2 plugin\(s\) loaded/, `the configured plugins still loaded; output:\n${output}`)
   } finally {
     child.kill('SIGTERM')
-    const code = await new Promise((resolve) => child.once('exit', (value) => resolve(value)))
+    const code = await new Promise((resolve) => {
+      if (child.exitCode !== null) return resolve(child.exitCode)
+      child.once('close', () => resolve(child.exitCode))
+    })
     assert.equal(code, 0, `serve must exit cleanly on SIGTERM; output:\n${output}`)
     fs.rmSync(fixture.dir, { recursive: true, force: true })
   }

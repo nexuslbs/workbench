@@ -1,5 +1,4 @@
 import type { Context } from 'cordis'
-import type { ParameterSchemaSpec, ToolDefinition, ToolInfo } from './tool-registry.ts'
 
 /** Manifest file name, one per plugin directory. */
 export const MANIFEST_FILE = 'workbench.plugin.json'
@@ -120,22 +119,25 @@ export interface LoadedPlugin {
  */
 export interface SourceAuthSpec {
   /**
-   * Credential TYPE this reference resolves to:
-   * - `token` (default): the credential value IS the token,
-   * - `github-app`: the value is a GitHub App PRIVATE KEY (PEM); a short-lived
-   *   installation access token is minted for `installationId` on every fetch,
-   *   so the operator keeps ONE key and no long-lived token anywhere.
+   * Credential TYPE this reference resolves to. The core knows ONE built-in
+   * value (`token`): the credential value IS the token. Every other type
+   * (`github-app`, and any future backend) is a GIT AUTH STRATEGY a PLUGIN
+   * registers with the credentials service
+   * (`ctx.credentials.registerGitAuth(...)`, e.g. the external
+   * `credentials-github-app` plugin): the core mints nothing itself. Without a
+   * registered handler for the type the source is reported as an error naming
+   * the type - never a silent anonymous fetch.
    */
-  type?: 'token' | 'github-app'
+  type?: string
   /** Credential reference BY NAME (`NAME` or `SCOPE/NAME`). Never a value. */
   credential: string
   /** `token`: username used in the basic auth header (default `x-access-token`). */
   username?: string
-  /** `github-app`: the App id the key belongs to (not a secret). */
+  /** Backend-specific field, read by the git auth handler of the type (e.g. the App id; never a secret). */
   appId?: number | string
-  /** `github-app`: the installation the token is minted for (not a secret). */
+  /** Backend-specific field, read by the git auth handler of the type (e.g. the installation id; never a secret). */
   installationId?: number | string
-  /** `github-app`: API base, default `https://api.github.com` (GitHub Enterprise). */
+  /** Backend-specific field, read by the git auth handler of the type (e.g. the API base). */
   apiBase?: string
 }
 
@@ -255,8 +257,6 @@ export interface HostInventory {
   /** Every discovered plugin with its state (loaded, failed, disabled, available). */
   discovered: PluginDiscoveryInfo[]
   commands: CommandInfo[]
-  /** Every registered TOOL with the plugin that owns it and its parameter schema. */
-  tools: ToolInfo[]
 }
 
 /** The actions the host (loader) API exposes. */
@@ -351,9 +351,6 @@ export interface WorkbenchConfig {
   credentials?: CredentialsConfig
   /** Web UI section (see {@link WebConfig}); absent keeps the historical behaviour. */
   web?: WebConfig
-  /** Email provider selection (see {@link EmailConfig}); absent enables every declared provider. */
-  /** TOTP provider selection (see {@link TotpConfig}); absent enables every declared provider. */
-  /** SMS provider selection (see {@link SmsConfig}); absent enables every declared provider. */
 }
 
 /**
@@ -386,18 +383,6 @@ export interface Workbench {
   /** Registers a command; returns the disposer that unregisters it again. */
   registerCommand(def: Omit<CommandDefinition, 'plugin'>): () => void
   commands(): CommandDefinition[]
-  /**
-   * Registers a TOOL: a unique name, a description, the parameters it expects
-   * (DSH-style map with `required: true` per property) and the handler to run
-   * once the params are validated. Returns the disposer that unregisters it.
-   */
-  registerTool(def: Omit<ToolDefinition, 'plugin' | 'schema'> & { parameters?: ParameterSchemaSpec }): () => void
-  /** Every registered tool with its parameter schema, sorted by name. */
-  tools(): ToolInfo[]
-  /** One registered tool definition, or undefined. */
-  tool(name: string): ToolDefinition | undefined
-  /** THE by-name dispatch: validate then run. Throws ToolUnknownError / ToolArgsError. */
-  executeTool(name: string, params?: unknown): Promise<unknown>
   /** Resolves argv to the longest matching command, the rest becomes args. */
   resolve(argv: string[]): { command: CommandDefinition; args: string[] } | undefined
   plugins(): LoadedPlugin[]

@@ -10,23 +10,17 @@
 // missing/unresolvable credential fails LOUDLY (structured error naming the
 // reference) instead of silently fetching anonymously.
 import assert from 'node:assert/strict'
-import { generateKeyPairSync } from 'node:crypto'
 import test from 'node:test'
-import {
-  clearInstallationTokenCache,
-  gitAuthArgs,
-  githubAppInstallationToken,
-  githubAppJwt,
-  resolveSourceAuth,
-  resolveSourceAuths,
-} from '../src/source-auth.ts'
+import { gitAuthArgs, resolveSourceAuth, resolveSourceAuths } from '../src/source-auth.ts'
 import { redactArgs, sourceId } from '../src/sources.ts'
-import type { CredentialConsumer, CredentialRef, CredentialResolution } from '../src/credentials/definition.ts'
+import type { CredentialConsumer, CredentialRef, CredentialResolution, GitAuthHandler } from '../src/credentials/definition.ts'
 import type { WorkbenchConfig } from '../src/types.ts'
 
 /** A fake value: never a real credential, and asserted to be non-leaking below. */
 const TOKEN = 'example-token-value-never-a-real-secret'
 const APP_KEY_REF = 'example-app-key'
+/** A fake App private key (never a real key): the VALUE a git auth handler receives. */
+const PRIVATE_KEY = 'example-app-private-key-value-never-a-real-secret'
 
 /**
  * A CONSUMER that answers from a map - the structural `CredentialConsumer` the
@@ -51,12 +45,19 @@ function consumer(values: Record<string, string>, enabled: string[] = ['fixture'
   }
 }
 
-function rsaKey(): string {
-  return generateKeyPairSync('rsa', {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-  }).privateKey
+/**
+ * The SAME consumer, plus the git auth lookup a PLUGIN registers on the live
+ * service: the core only dispatches by `auth.type`, so a test handler is enough
+ * to prove the dispatch (and that no minting code is needed in the core).
+ */
+function consumerWithGitAuth(values: Record<string, string>, handlers: GitAuthHandler[]): CredentialConsumer {
+  const base = consumer(values)
+  const byType = new Map(handlers.map((handler) => [handler.type, handler]))
+  return {
+    ...base,
+    gitAuth: (type: string) => byType.get(type),
+    gitAuthTypes: () => [...byType.keys()].sort(),
+  }
 }
 
 test('source auth: a token credential becomes a transient git auth argument', async () => {
@@ -131,67 +132,64 @@ test('source auth: an invalid reference is a structured error, not a throw', asy
   assert.match(auth.error, /credential/)
 })
 
-test('source auth (github-app): the key reference is exchanged for a short-lived installation token', async () => {
-  const privateKey = rsaKey()
-  const calls: string[] = []
-  const fetchImpl = (async (url: string | URL) => {
-    calls.push(String(url))
-    return new Response(JSON.stringify({ token: 'ghs_example_installation_token' }), {
-      status: 201,
-      headers: { 'content-type': 'application/json' },
-    })
-  }) as unknown as typeof fetch
-
+test('source auth (non-builtin type): the resolved value goes to the PLUGIN-registered git auth handler', async () => {
+  const seen: { auth: Record<string, unknown>; value: string }[] = []
+  const handler: GitAuthHandler = {
+    type: 'github-app',
+    args(request) {
+      seen.push({ auth: request.auth, value: request.value })
+      // A handler mints / formats from the VALUE it received in memory only.
+      return gitAuthArgs('ghs_example_installation_token')
+    },
+  }
   const auth = await resolveSourceAuth(
     { credential: APP_KEY_REF, type: 'github-app', appId: 3967918, installationId: 138119822 },
-    { credentials: consumer({ [APP_KEY_REF]: privateKey }), fetchImpl },
+    { credentials: consumerWithGitAuth({ [APP_KEY_REF]: PRIVATE_KEY }, [handler]) },
   )
   assert.equal(auth.ok, true)
   assert.ok(auth.ok)
-  assert.match(auth.mechanism, /github-app installation token/)
-  assert.match(auth.mechanism, /3967918/)
+  assert.match(auth.mechanism, /via the 'github-app' git auth handler/)
   assert.equal(auth.credential, APP_KEY_REF)
-  assert.equal(calls.length, 1)
-  assert.match(calls[0]!, /\/app\/installations\/138119822\/access_tokens$/)
-  // The minted TOKEN is in the args, the private KEY (the credential value) is not.
-  const joined = auth.args.join(' ')
-  assert.ok(!joined.includes(privateKey.split('\n')[1]!))
+  assert.equal(auth.provider, 'fixture')
+  assert.equal(seen.length, 1)
+  // The handler got the credential VALUE plus the source `auth` block (names/ids only).
+  assert.equal(seen[0]!.value, PRIVATE_KEY)
+  assert.equal(seen[0]!.auth.appId, 3967918)
+  assert.equal(seen[0]!.auth.installationId, 138119822)
+  // The core adds NOTHING of its own: the args are exactly what the plugin returned.
+  assert.deepEqual(auth.args, gitAuthArgs('ghs_example_installation_token'))
+  // The credential VALUE (the App key) never reaches the git arguments.
+  assert.ok(!auth.args.some((arg) => arg.includes(PRIVATE_KEY)))
 })
 
-test('githubAppJwt signs an RS256 JWT for the app id', () => {
-  const jwt = githubAppJwt({ appId: 3967918, privateKey: rsaKey(), now: 1_700_000_000 })
-  const parts = jwt.split('.')
-  assert.equal(parts.length, 3)
-  const header = JSON.parse(Buffer.from(parts[0]!, 'base64url').toString()) as { alg?: string; typ?: string }
-  const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString()) as { iss?: unknown; iat?: number; exp?: number }
-  assert.equal(header.alg, 'RS256')
-  assert.equal(String(payload.iss), '3967918')
-  assert.ok((payload.exp ?? 0) > (payload.iat ?? 0))
-  assert.ok(parts[2]!.length > 100)
+test('source auth: an auth.type no plugin provides fails loudly, naming the type (no core fallback)', async () => {
+  const auth = await resolveSourceAuth(
+    { credential: APP_KEY_REF, type: 'github-app' },
+    { credentials: consumerWithGitAuth({ [APP_KEY_REF]: PRIVATE_KEY }, []) },
+  )
+  assert.equal(auth.ok, false)
+  assert.ok(!auth.ok)
+  assert.match(auth.error, /'github-app'/)
+  assert.match(auth.error, /core ships NO backend/)
+  assert.match(auth.error, /credentials-github-app/)
+  assert.match(auth.error, /Registered types: \(none\)/)
 })
 
-test('githubAppInstallationToken mints through the GitHub App REST flow', async () => {
-  // The github-app RESOLUTION test above minted a token for the SAME
-  // app/installation: the token cache is process wide, so clear it to mint here.
-  clearInstallationTokenCache()
-  const calls: Array<{ url: string; method?: string }> = []
-  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
-    calls.push({ url: String(url), method: init?.method })
-    return new Response(JSON.stringify({ token: 'ghs_minted', expires_at: new Date(Date.now() + 3_600_000).toISOString() }), {
-      status: 201,
-      headers: { 'content-type': 'application/json' },
-    })
-  }) as unknown as typeof fetch
-  const minted = await githubAppInstallationToken({
-    appId: 3967918,
-    installationId: 138119822,
-    privateKey: rsaKey(),
-    fetchImpl,
-  })
-  assert.equal(minted.token, 'ghs_minted')
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0]!.method, 'POST')
-  assert.match(calls[0]!.url, /^https:\/\/api\.github\.com\/app\/installations\/138119822\/access_tokens$/)
+test('source auth: a git auth handler that throws is reported, never swallowed', async () => {
+  const handler: GitAuthHandler = {
+    type: 'github-app',
+    args() {
+      throw new Error('the App key is not a valid PEM')
+    },
+  }
+  const auth = await resolveSourceAuth(
+    { credential: APP_KEY_REF, type: 'github-app' },
+    { credentials: consumerWithGitAuth({ [APP_KEY_REF]: PRIVATE_KEY }, [handler]) },
+  )
+  assert.equal(auth.ok, false)
+  assert.ok(!auth.ok)
+  assert.match(auth.error, /example-app-key/)
+  assert.match(auth.error, /not a valid PEM/)
 })
 
 test('gitAuthArgs never persists the token: no helper, no url credential', () => {

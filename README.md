@@ -93,23 +93,28 @@ Plugin loading messages go to stderr, command output to stdout.
 
 ## Service mode (`serve`)
 
-`workbench serve` boots the plugins, serves a tiny status endpoint
-(`GET /health` -> the config file, the loaded plugins and their sources) and
-stays up until `SIGINT`/`SIGTERM`. It is what the compose service runs, so the
-container is `Up` because it hosts something, not because it sleeps.
+`workbench serve` boots the plugins, REPORTS the web state and stays up until
+`SIGINT`/`SIGTERM`. The core binds NO socket of its own: the ONLY listener is
+the one a `web@1` PROVIDER plugin brings up (see the Web UI section below). It
+is what the compose service runs, so the container is `Up` because the plugin
+that serves it answered, not because the core sleeps.
 
 ```console
 $ npm run dev -- serve
-workbench: serving on http://0.0.0.0:12347 config=/path/to/workbench.config.yml
+workbench: web state=off - no web@1 provider plugin is loaded and this process binds no port
 workbench: 0 plugin(s) loaded (0 core, 0 external), 0 available (not on the plugins: roster), 0 disabled, 0 failed
 ```
+
+With `web.enabled: true` and no provider plugin the state is `deferred`
+(`workbench: web is DEFERRED - no plugin providing web@1 is loaded ...`): still
+no port, no crash, and the process keeps running.
 
 Environment (all optional):
 
 | Variable | Meaning |
 | --- | --- |
 | `CONFIG_FILE` | Config file to use when `--config` is not given; empty/unset = the default lookup described below. |
-| `WORKBENCH_PORT` | Port of the `serve` status endpoint (default `12347`); `--port` wins. |
+| `WORKBENCH_PORT` | The port a DEPLOYMENT publishes; `serve` exports it (and `--port` / `--web-port`) into the environment the web provider plugin reads. The core binds nothing itself. |
 | `WORKBENCH_CACHE_DIR` | Where `git` plugin sources are checked out (default `<config dir>/.workbench/sources`). |
 
 ## Web UI (`web`)
@@ -131,17 +136,21 @@ workbench: web UI on http://127.0.0.1:12348 (config <path>)
   PLUGIN loaded (from an external source) that plugin owns the published port -
   the browser UI, its shell/assets/routes AND `/health` all answer on it. With
   `web.enabled: true` and NO provider plugin the section is DEFERRED: the core
-  logs it, answers `/health` on the port itself and keeps running.
+  logs the state, binds NOTHING and keeps running (there is no core listener to
+  fall back to, by design).
 - No auth this round: the default bind is loopback on purpose. Binding a
   non-loopback host exposes the UI to everyone who can reach it.
 
 ## Tools API
 
 A plugin registers a named tool (a description, the parameters it expects and a
-handler) through `ctx.workbench.registerTool`; the core exposes it for by-name
-invocation over HTTP, with the parameters as the request body. Workbench has no
-model and no agent loop: the callers are plugins and operators. The full
-contract is [docs/PLUGIN-CONTRACT.md](docs/PLUGIN-CONTRACT.md) section 4d.
+handler) through `ctx.tools.registerTool` - the `tools@1` capability is a PLUGIN
+(the `tools-impl` provider, Definition in `definitions/tools.ts`, both from the
+public plugins repository), never core code. The provider registers the by-name
+invocation routes below on the `web@1` seam, with the parameters as the request
+body. Workbench has no model and no agent loop: the callers are plugins and
+operators. The full contract is
+[docs/PLUGIN-CONTRACT.md](docs/PLUGIN-CONTRACT.md) section 4d.
 
 | Route | Behaviour |
 | --- | --- |
@@ -180,17 +189,17 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:12348/api/to
 
 | Command | Description |
 | --- | --- |
-| `workbench serve` | Boot the plugins and keep running (service mode; status endpoint on `--port` / `WORKBENCH_PORT`, default 12347). With `web.enabled: true` the same process also starts the Web UI. |
+| `workbench serve` | Boot the plugins and keep running (service mode). The core binds NO port: with a `web@1` provider plugin loaded that plugin serves the Web UI and `/health` on the port it resolves (`WORKBENCH_PORT`, `--port` / `--web-port`). |
 | `workbench web` | Boot the plugins and serve the plugin-composed Web UI (default `127.0.0.1:12348`). |
 | `workbench <command> [args...]` | Run the command registered by a plugin (longest match wins, the rest becomes args). |
 | `workbench plugins` | List loaded plugins, their source and their capabilities. |
 | `workbench commands` | List the registered commands (and the plugin that registered them). |
-| `workbench tools` | List the registered tools WITH their parameter schema and owning plugin. |
-| `workbench tool <name> ['<json params>']` | Invoke one tool through the same dispatch the HTTP routes use (`workbench tool 'hello greet' '{"name":"Ada"}'`); invalid params exit `2`, an unknown tool exits `1`. |
+| `workbench tools` | List the registered tools WITH their parameter schema and owning plugin (registered by the `tools-impl` plugin). |
+| `workbench tool <name> ['<json params>']` | Invoke one tool through the same dispatch the HTTP routes use (provided by the `tools-impl` plugin; `workbench tool 'hello greet' '{"name":"Ada"}'`); invalid params exit `2`, an unknown tool exits `1`. |
 | `workbench plugins --json` / `workbench commands --json` | Machine-readable variants. |
 | `--config <file>` | Use another config file; `.json`, `.yml` or `.yaml` (the extension selects the parser). |
-| `--port <n>` | `serve` only: status endpoint port (overrides `WORKBENCH_PORT`). |
-| `--web-port <n>` | `serve` only: Web UI port when the config enables the UI; set it to the status port to serve the UI and `/health` on ONE listener. |
+| `--port <n>` | Exported as `$WORKBENCH_PORT` for the web provider plugin (the core binds nothing). |
+| `--web-port <n>` | Exported as `$WORKBENCH_WEB_PORT` for the web provider plugin (the plugin resolves the port). |
 | `--no-external` | Skip external sources (with the shipped default config nothing loads at all). |
 | `--help` | Usage. |
 
@@ -318,8 +327,8 @@ workbench/                       the KERNEL: no plugin, no feature module
   src/
     cli.ts        CLI entrypoint (npm run dev)
     credentials/  the credentials capability: the DEFINITION only (no provider)
-    tool-registry.ts  the named-tool registry (dispatch only: no tool ships here)
-    tool-routes.ts    the HTTP/CLI routes that dispatch those tools
+    web-seam.ts       the TYPE-ONLY web@1 seam: the core registers its /health
+                      and /api/plugins routes on it, the provider is a plugin
     kernel.ts     boot: cordis root context + workbench service + load + ${cred:} gate
     loader.ts     plugin discovery + manifest validation + import + ctx.plugin
     registry.ts   the workbench service (commands + plugins)

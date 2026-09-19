@@ -103,23 +103,12 @@ function freePort(): Promise<number> {
   })
 }
 
-async function waitForHealth(port: number, timeoutMs = 10_000): Promise<Record<string, unknown>> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`)
-      if (response.ok) return (await response.json()) as Record<string, unknown>
-    } catch {
-      // not listening yet
-    }
-    if (Date.now() > deadline) throw new Error(`no /health answer on port ${port}`)
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-}
-
 function stop(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
-    child.once('exit', () => resolve())
+    // `close` (not `exit`) plus the already-exited guard: a child that died
+    // before we attach the listener would otherwise hang the test forever.
+    if (child.exitCode !== null || child.signalCode !== null) return resolve()
+    child.once('close', () => resolve())
     child.kill('SIGTERM')
   })
 }
@@ -165,7 +154,10 @@ test('a provider PLUGIN serves the seam and the core registers its own routes on
     const routes = JSON.parse(String(answer)) as string[]
     assert.ok(routes.includes('GET /health'), `the core registered its status route on the plugin seam (${routes.join(', ')})`)
     assert.ok(routes.includes('GET /api/plugins'), 'the core registered its inventory route on the plugin seam')
-    assert.ok(routes.some((route) => route.startsWith('POST /api/tools/')), 'the core registered the tool dispatch on the plugin seam')
+    assert.ok(
+      routes.every((route) => !route.includes('/api/tools')),
+      `the core registers NO tool route: the tools capability lives in a plugin (${routes.join(', ')})`,
+    )
   } finally {
     await kernel.dispose()
     fs.rmSync(fixture.dir, { recursive: true, force: true })
@@ -208,7 +200,7 @@ test('a provider that answers /health ITSELF is not double-registered by the cor
   }
 })
 
-test('the deferred section keeps the service UP: /health answers with the structured state', async () => {
+test('the deferred section binds NO port: the process stays UP and reports the structured state', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-web-deferred-'))
   const configFile = path.join(dir, 'config.yml')
   fs.writeFileSync(
@@ -224,11 +216,16 @@ test('the deferred section keeps the service UP: /health answers with the struct
   child.stdout?.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')))
   child.stderr?.on('data', (chunk: Buffer) => (output += chunk.toString('utf8')))
   try {
-    const status = await waitForHealth(port)
-    assert.equal(status.status, 'ok', 'the deferred web section does not stop the service')
-    assert.deepEqual(status.plugins, [])
-    assert.equal((status.web as { state?: string }).state, 'deferred', 'the status reports the deferral, never a silent skip')
-    assert.match(output, /web is DEFERRED/, 'and the operator sees it on stdout too')
+    // The core owns NO listener: with no provider plugin NOTHING is bound (the
+    // web server is always a plugin) and the deferral is reported instead.
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    await assert.rejects(
+      fetch(`http://127.0.0.1:${port}/health`),
+      'the core must not bind a port when no web@1 provider plugin is loaded',
+    )
+    assert.equal(child.exitCode, null, `the deferred web section keeps the process UP; output:\n${output}`)
+    assert.match(output, /web is DEFERRED/, 'the operator sees the structured deferral on stdout, never a silent skip')
+    assert.match(output, /0 plugin\(s\) loaded/, `and the inventory with it; output:\n${output}`)
   } finally {
     await stop(child)
     fs.rmSync(dir, { recursive: true, force: true })

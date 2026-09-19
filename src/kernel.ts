@@ -8,11 +8,12 @@ import { loadPlugins, type LoadFailure, type PluginDiscovery, type SourceReport 
 import { resolveSourceAuths } from './source-auth.ts'
 import { sourceId, type SourceAuthOutcome } from './sources.ts'
 import { CommandRegistry } from './registry.ts'
-// The core's OWN routes on the web seam (the loader status, the inventory, the
-// tool dispatch). The seam is declared STRUCTURALLY in tool-routes.ts on purpose:
-// the `web@1` Definition lives in the EXTERNAL plugins repository and the core
-// must not import it.
-import { registerToolRoutes, type WebRequest, type WebResponse, type WebSeam } from './tool-routes.ts'
+// The core's OWN routes on the web seam (the loader status, the inventory). The
+// seam is declared STRUCTURALLY in `./web-seam.ts` (type-only) on purpose: the
+// `web@1` Definition lives in the EXTERNAL plugins repository and the core must
+// not import it. The server itself is a PROVIDER PLUGIN, so the core binds no
+// port and owns no route beyond these two.
+import type { WebRequest, WebResponse, WebSeam } from './web-seam.ts'
 import type { ConfigApi, LoadedPlugin, Workbench, WorkbenchConfig } from './types.ts'
 
 export interface KernelOptions {
@@ -74,12 +75,6 @@ export interface Kernel {
    * the deployment is served, deferred (asked for, no provider loaded) or off.
    */
   webState: WebState
-  /**
-   * The EMAIL capability (`email@1`): what consumers call (`accounts`, `list`,
-   * `get`, `code`, `search`) and what provider plugins register with
-   * (`register`). Also reachable as `ctx.email` from any plugin
-   * (inject: ['email']).
-   */
   /**
    * The host (loader) API: the live plugin set and every mutation of it
    * (load/unload/reload/retry/enable/disable/install/uninstall). Also reachable
@@ -184,9 +179,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
 
   /**
    * Registers the core's OWN routes on the seam: the loader status endpoint the
-   * deployment healthchecks probe, the loader inventory and the by-name tool
-   * dispatch. Called ONLY when a `web@1` provider plugin provided `ctx.web`; the
-   * handlers read the live host/registry, so they follow load/unload/reload.
+   * deployment healthchecks probe and the loader inventory. Called ONLY when a
+   * `web@1` provider plugin provided `ctx.web`; the handlers read the live host,
+   * so they follow load/unload/reload. The core owns no other route: the tool
+   * dispatch (`/api/tools*`) is served by the external `tools-impl` plugin.
    */
   const registerCoreRoutes = (web: WebSeam): void => {
     // `/health` belongs to the LISTENER owner: the real provider plugin
@@ -210,10 +206,6 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       description: 'the loader inventory (core): an EMPTY list is a valid answer',
       handler: pluginsHandler,
     })
-    // The by-name TOOL INVOCATION surface: the registered tools belong to the
-    // plugins, the routes are the core's contract for them; the dispatch reads
-    // the live registry, so it follows load/unload.
-    registerToolRoutes(web, registry)
   }
 
   // The credentials service: the DEFINITION's own implementation (the routing

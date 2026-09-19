@@ -24,7 +24,6 @@ import { readConfig } from './config.ts'
 import { readRawConfig, updateConfigFile } from './configfile.ts'
 import { discoverPlugins, isDisabled, isRosterMember, loadDiscovered, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { resolveSource, sourceId, type SourceAuthOutcome } from './sources.ts'
-import type { ToolInfo } from './tool-registry.ts'
 import {
   renderCapability,
   type CommandInfo,
@@ -85,7 +84,6 @@ export interface HostOptions {
 /** The slice of the core service the host needs (avoids an import cycle). */
 interface RegistryLike {
   commands(): CommandInfo[] | { name: string; description?: string; plugin?: string }[]
-  tools(): ToolInfo[]
   setPlugins(plugins: LoadedPlugin[]): void
 }
 
@@ -188,7 +186,6 @@ export class Host implements HostApi {
   inventory(): HostInventory {
     const registry = this.registry()
     const commands = registry.commands() as CommandInfo[]
-    const tools = registry.tools() as ToolInfo[]
     const config = this.writtenConfig()
     const entries = [...this.entries.values()].sort((a, b) => a.discovery.name.localeCompare(b.discovery.name))
     const plugins: LoadedPlugin[] = []
@@ -232,7 +229,6 @@ export class Host implements HostApi {
       available,
       discovered,
       commands: commands.map(({ name, description, plugin }) => ({ name, description, plugin })),
-      tools,
     }
   }
 

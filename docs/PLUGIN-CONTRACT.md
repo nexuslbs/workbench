@@ -306,7 +306,7 @@ server.
 | Command | Behaviour |
 | --- | --- |
 | `workbench web` | Boots the kernel and reports the web state. With a `web@1` provider plugin loaded, THAT plugin serves the UI on its own port (the URL is logged by the plugin); without one the command reports the deferred state and starts no listener. |
-| `workbench serve` | The long-running service mode (status endpoint on `--port`/`$WORKBENCH_PORT`, default 12347). `web.enabled: true` makes the section eligible; a loaded provider plugin owns the port from its own config, and the core keeps its status listener as well when the two ports differ. |
+| `workbench serve` | The long-running service mode. The core binds NO socket: it reports the web state and keeps running. `web.enabled: true` makes the section eligible; a loaded provider plugin owns the port it resolves from its own config (it also answers `/health`, or the core registers its `/health` route ON the seam when the provider answers none). |
 
 ```yaml
 web:
@@ -317,10 +317,11 @@ web:
 
 Port resolution of the listener the PROVIDER binds (the plugin's own row wins):
 `plugins.<provider>.port`, then `$WORKBENCH_WEB_PORT`, then `$WORKBENCH_PORT`
-(the port a deployment publishes), then the definition default `12348`. That
-order is what lets ONE published port carry the UI and the `/health` the compose
-healthcheck probes: publish 12347, roster the provider with `port: 12347`, and
-the provider answers both while the core binds nothing.
+(the port a deployment publishes, which `serve` exports from `--port` /
+`--web-port`), then the definition default `12348`. That order is what lets ONE
+published port carry the UI and the `/health` the compose healthcheck probes:
+publish 12347, roster the provider with `port: 12347`, and the provider answers
+both while the core binds nothing.
 
 A UI plugin is an ordinary plugin: a directory in any configured source with a
 manifest (`entry`, `capabilities` - e.g. `web:page:plugin-inventory`) and an
@@ -328,13 +329,19 @@ entry module that registers its routes, assets and page. Removing it from the
 config leaves the provider (and every other surface) working; removing the
 PROVIDER plugin from the config leaves the core running with `web: deferred`.
 
-## 4d. Tools capability (`ctx.workbench.registerTool`)
+## 4d. Tools capability (`ctx.tools.registerTool`)
+
+The tools capability lives ENTIRELY in the public plugins repository
+(`nexuslbs/workbench-plugins`): the Definition is `definitions/tools.ts` and the
+provider is the `tools-impl` plugin, which provides `ctx.tools` and registers
+the routes below on the `web@1` seam. The core ships NO tools code - no
+definition, no registry, no route.
 
 A CONSUMER plugin may register a named **tool**: a unique name, a description,
 the parameters it expects (a small, JSON-Schema-compatible spec) and a handler.
-The core exposes the registered tools so ANY caller - an operator's `curl`, the
-CLI, another plugin in process - invokes one BY NAME with the parameters as the
-request body:
+The PROVIDER exposes the registered tools so ANY caller - an operator's `curl`,
+the CLI, another plugin in process - invokes one BY NAME with the parameters as
+the request body (the wire contract below is unchanged):
 
 ```
 POST /api/tools/<name>      canonical: the JSON body IS the parameter object
@@ -366,8 +373,8 @@ human-readable, path-qualified violations (`name: missing required parameter`,
 `times: expected an integer, got string`, `nope: unknown parameter`).
 
 ONE dispatch function is the single entry point for invocation + validation
-(`ToolRegistry.execute`, reached as `ctx.workbench.executeTool`): the HTTP
-handlers, the CLI and any in-process caller all go through it and cannot drift.
+(`ToolsService.execute`, reached as `ctx.tools.executeTool`): the HTTP handlers,
+the CLI and any in-process caller all go through it and cannot drift.
 
 | Status | When |
 | --- | --- |
@@ -414,9 +421,9 @@ layers - workbench has no model.
 Email is the second capability that uses the three-role seam (definition,
 provider, consumer), exactly like credentials (4b) and web (4c):
 
-- **Definition** (core, `src/email/definition.ts`, exported from
-  `src/index.ts`): the typed contract, the `email@1` version and the `ctx.email`
-  handle (`inject: ['email']`). It names no protocol, no vendor and no mail CLI:
+- **Definition** (`definitions/email.ts` in the plugins repository): the typed
+  contract, the `email@1` version and the `ctx.email` handle
+  (`inject: ['email']`). It names no protocol, no vendor and no mail CLI:
   an external provider must be implementable from the definition plus this
   document alone.
 - **Provider**: an implementation of the contract. Its manifest declares the
