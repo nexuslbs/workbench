@@ -73,7 +73,7 @@ export interface LoadOptions {
   /**
    * Source AUTH resolved BEFORE the walk, keyed by source id: a `git` source that
    * declares `auth` cannot be fetched without it (the caller resolves it through
-   * the BOOTSTRAP credential set, `src/credentials/providers/bootstrap.ts`, which exists
+   * the LIVE credentials service (a provider plugin), which is loaded
    * without any plugin). Omitted = anonymous fetch, exactly as before.
    */
   sourceAuth?: ReadonlyMap<string, SourceAuthOutcome>
@@ -174,7 +174,7 @@ export function discoverPlugins(options: LoadOptions): DiscoverReport {
     if (external && !options.includeExternal) continue
 
     // A source that declares `auth` is fetched with the auth the CALLER resolved
-    // through the BOOTSTRAP credential set, keyed by source id (the same key
+    // through the LIVE credentials service, keyed by source id (the same key
     // `resolveSourceAuths` produces). A missing entry is NOT an anonymous retry:
     // `resolveSource` reports the source loudly and the walk skips it.
     const source: ResolvedSource = resolveSource(

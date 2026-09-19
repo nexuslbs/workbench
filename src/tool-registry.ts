@@ -27,7 +27,7 @@
  * The contract is documented in `docs/PLUGIN-CONTRACT.md` ("Tools"); this module
  * names no HTTP server and no CLI.
  */
-import { applyingPlugin } from '../attribution.ts'
+import { applyingPlugin } from './attribution.ts'
 
 /** Name of the capability, e.g. `tools@1` in the HTTP list payload. */
 export const TOOLS = 'tools'

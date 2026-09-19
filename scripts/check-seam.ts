@@ -36,7 +36,13 @@ const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
  * `src/`: a definition module, optional core provider modules, and consumers.
  * Adding a capability here is what puts it under the check.
  */
-const CAPABILITIES = ['credentials', 'email', 'totp', 'sms']
+// v0.0.2: the core ships NO plugin and no capability IMPLEMENTATION except the
+// `web` serve providers. The credential providers moved to the PUBLIC
+// `nexuslbs/workbench-plugins` repository (plugin `credentials-basic`); `email`,
+// `sms`, `totp` and the tool registry are plugin concerns now. The directory
+// entries are kept so a provider module placed under one of them is still
+// classified as a provider (the rule must not rot).
+const CAPABILITIES = ['credentials', 'web']
 /** Definition modules: `src/<capability>/definition.ts`. */
 const DEFINITIONS = CAPABILITIES.map((capability) => `src/${capability}/definition.ts`)
 /** Provider modules: `src/<capability>/providers/` (a provider may also live in another repo). */

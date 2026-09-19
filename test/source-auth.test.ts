@@ -1,286 +1,219 @@
-/**
- * SOURCE AUTH tests: a private `git` source is fetched with a credential that is
- * resolved by the BOOTSTRAP set (no plugin loaded) and used TRANSIENTLY.
- *
- * Everything here runs against LOCAL git repositories and a STUB GitHub API, so
- * the suite needs no network and no real secret. The values used are obvious
- * fakes.
- */
+// SOURCE AUTHENTICATION tests (`src/source-auth.ts`).
+//
+// The core SHIPS NO CREDENTIAL PROVIDER (operator rule 2026-09-19): a provider
+// is a plugin from an external source. These tests therefore drive the module
+// through the CONSUMER contract (`CredentialConsumer`) with a fake consumer -
+// never through a provider implementation, which does not exist in this repo.
+//
+// What is asserted: a credential REFERENCE becomes a TRANSIENT git auth
+// argument, the VALUE never leaks into the arguments or the error text, and a
+// missing/unresolvable credential fails LOUDLY (structured error naming the
+// reference) instead of silently fetching anonymously.
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
 import test from 'node:test'
-// Through the package entry: only the composition root (src/index.ts,
-// src/kernel.ts) may name a concrete provider, which is what the seam check
-// enforces - a test is a consumer like any other.
-import { bootstrapCredentials } from '../src/index.ts'
 import {
   clearInstallationTokenCache,
+  gitAuthArgs,
+  githubAppInstallationToken,
   githubAppJwt,
   resolveSourceAuth,
   resolveSourceAuths,
 } from '../src/source-auth.ts'
-import { discoverPlugins } from '../src/loader.ts'
-import { redactArgs, resolveSource } from '../src/sources.ts'
-import type { SourceSpec } from '../src/types.ts'
+import { redactArgs, sourceId } from '../src/sources.ts'
+import type { CredentialConsumer, CredentialRef, CredentialResolution } from '../src/credentials/definition.ts'
+import type { WorkbenchConfig } from '../src/types.ts'
 
-const TOKEN = 'wb-fake-token-0123456789'
-const BASIC = Buffer.from(`x-access-token:${TOKEN}`, 'utf8').toString('base64')
+/** A fake value: never a real credential, and asserted to be non-leaking below. */
+const TOKEN = 'example-token-value-never-a-real-secret'
+const APP_KEY_REF = 'example-app-key'
 
-function gitEnv(): NodeJS.ProcessEnv {
+/**
+ * A CONSUMER that answers from a map - the structural `CredentialConsumer` the
+ * core speaks. It stands in for the credentials SERVICE (which the kernel
+ * hosts); it is NOT a provider.
+ */
+function consumer(values: Record<string, string>, enabled: string[] = ['fixture']): CredentialConsumer {
   return {
-    ...process.env,
-    GIT_AUTHOR_NAME: 'workbench-test',
-    GIT_AUTHOR_EMAIL: 'test@workbench.local',
-    GIT_COMMITTER_NAME: 'workbench-test',
-    GIT_COMMITTER_EMAIL: 'test@workbench.local',
-    GIT_TERMINAL_PROMPT: '0',
+    async resolve(ref: CredentialRef): Promise<CredentialResolution | undefined> {
+      const label = ref.scope ? `${ref.scope}/${ref.name}` : ref.name
+      const value = values[label]
+      if (value === undefined) return undefined
+      return { ref, value, provider: 'fixture', contract: 'credentials@1' }
+    },
+    async explain() {
+      throw new Error('explain() is not used by the source-auth tests')
+    },
+    async list() {
+      return Object.keys(values)
+    },
+    enabled: () => enabled,
   }
 }
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, env: gitEnv(), encoding: 'utf8' })
-}
-
-/** A local "remote" holding one plugin, so no test touches the network. */
-function makeRemote(root: string): string {
-  const origin = path.join(root, 'origin')
-  fs.mkdirSync(path.join(origin, 'plugins', 'hello-private'), { recursive: true })
-  fs.writeFileSync(
-    path.join(origin, 'plugins', 'hello-private', 'workbench.plugin.json'),
-    JSON.stringify({ name: 'hello-private', version: '0.0.1', entry: 'index.ts' }),
-  )
-  fs.writeFileSync(path.join(origin, 'plugins', 'hello-private', 'index.ts'), 'export default { name: "hello-private", apply: () => {} }\n')
-  git(origin, ['init', '--quiet', '-b', 'main'])
-  git(origin, ['add', '.'])
-  git(origin, ['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'hello-private'])
-  return origin
-}
-
-function tmpRoot(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'wb-source-auth-'))
-}
-
-function specFor(origin: string, auth: SourceSpec['auth']): SourceSpec {
-  return {
-    kind: 'git',
-    id: 'private-local',
-    url: `file://${origin}`,
-    ref: 'main',
-    ...(auth === undefined ? {} : { auth }),
-  }
-}
-
-test('source auth: a token credential is resolved by the bootstrap set and the fetch succeeds', async () => {
-  const root = tmpRoot()
-  const origin = makeRemote(root)
-  const cache = path.join(root, 'cache')
-  process.env.WB_TEST_SOURCE_TOKEN = TOKEN
-  // No plugin is loaded here: the bootstrap set is core providers only.
-  const credentials = bootstrapCredentials({ configDir: root })
-  assert.deepEqual(credentials.enabled(), ['env', 'file', 'project-env', 'user-env'])
-
-  const auth = await resolveSourceAuth({ type: 'token', credential: 'WB_TEST_SOURCE_TOKEN' }, { credentials })
-  assert.equal(auth.ok, true)
-  if (!auth.ok) return
-  assert.equal(auth.provider, 'env')
-  assert.equal(auth.credential, 'WB_TEST_SOURCE_TOKEN')
-  const rendered = auth.args.join(' ') // prettier-ignore
-  assert.match(rendered, /-c credential\.helper= /)
-  assert.match(rendered, new RegExp(`http\\.extraheader=Authorization: Basic ${BASIC}`))
-
-  const spec = specFor(origin, { type: 'token', credential: 'WB_TEST_SOURCE_TOKEN' })
-  const resolved = resolveSource(spec, root, cache, auth)
-  assert.equal(resolved.error, undefined)
-  assert.ok(resolved.dir !== null)
-  assert.ok(fs.existsSync(path.join(resolved.dir as string, 'plugins', 'hello-private', 'workbench.plugin.json')))
-
-  // NOTHING persisted: no token in the checkout config, no credential file, and
-  // the remote url is exactly the configured one.
-  const config = fs.readFileSync(path.join(resolved.dir as string, '.git', 'config'), 'utf8')
-  assert.ok(!config.includes(TOKEN), 'the token must not be persisted in .git/config')
-  assert.ok(!config.includes(BASIC), 'the auth header must not be persisted in .git/config')
-  assert.match(config, /url = file:\/\//)
-  assert.equal(fs.existsSync(path.join(resolved.dir as string, '.git-credentials')), false)
-
-  // The UPDATE path (in-place fetch of the same ref) works with the same auth.
-  const second = resolveSource(spec, root, cache, auth)
-  assert.equal(second.error, undefined)
-  assert.equal(second.dir, resolved.dir)
-})
-
-test('source auth: a missing credential fails loudly, names the source, and never serves a stale checkout', async () => {
-  const root = tmpRoot()
-  const origin = makeRemote(root)
-  const cache = path.join(root, 'cache')
-  const credentials = bootstrapCredentials({ configDir: root })
-  const spec = specFor(origin, { type: 'token', credential: 'WB_TEST_ABSENT' })
-
-  const auth = await resolveSourceAuth({ type: 'token', credential: 'WB_TEST_ABSENT' }, { credentials })
-  assert.equal(auth.ok, false)
-  if (auth.ok) return
-  assert.match(auth.error, /WB_TEST_ABSENT/)
-
-  // A stale checkout from an earlier run exists: it must NOT be served.
-  const stale = path.join(cache, 'private-local')
-  fs.mkdirSync(path.join(stale, '.git'), { recursive: true })
-  fs.mkdirSync(path.join(stale, 'plugins', 'hello-private'), { recursive: true })
-
-  const resolved = resolveSource(spec, root, cache, auth)
-  assert.equal(resolved.dir, null)
-  assert.match(resolved.error as string, /source 'private-local' \(git file:.* @ main\): authentication failed/)
-  assert.match(resolved.error as string, /WB_TEST_ABSENT/)
-
-  // No auth outcome at all: a source that declares auth is never fetched anonymously.
-  const anonymous = resolveSource(spec, root, cache)
-  assert.equal(anonymous.dir, null)
-  assert.match(anonymous.error as string, /declares 'auth' but no credential was resolved/)
-})
-
-test('source auth: resolution is per source id, and a broken source never hides the others', async () => {
-  const root = tmpRoot()
-  const origin = makeRemote(root)
-  process.env.WB_TEST_SOURCE_TOKEN = TOKEN
-  const credentials = bootstrapCredentials({ configDir: root })
-  const config = {
-    sources: [
-      specFor(origin, { type: 'token', credential: 'WB_TEST_SOURCE_TOKEN' }),
-      { kind: 'git' as const, id: 'broken', url: `file://${path.join(root, 'nope')}`, ref: 'main', auth: { credential: 'WB_TEST_ABSENT' } },
-    ],
-  }
-  const auths = await resolveSourceAuths(config as never, { configDir: root, credentials })
-  assert.deepEqual([...auths.keys()], ['private-local', 'broken'])
-  assert.equal(auths.get('private-local')?.ok, true)
-  assert.equal(auths.get('broken')?.ok, false)
-
-  const good = resolveSource(config.sources[0], root, path.join(root, 'cache'), auths.get('private-local'))
-  assert.equal(good.error, undefined)
-  const broken = resolveSource(config.sources[1], root, path.join(root, 'cache'), auths.get('broken'))
-  assert.equal(broken.dir, null)
-  assert.match(broken.error as string, /source 'broken'/)
-})
-
-test('source auth: a failing git command never echoes the token', async () => {
-  const root = tmpRoot()
-  process.env.WB_TEST_SOURCE_TOKEN = TOKEN
-  const credentials = bootstrapCredentials({ configDir: root })
-  const auth = await resolveSourceAuth({ type: 'token', credential: 'WB_TEST_SOURCE_TOKEN' }, { credentials })
-  assert.equal(auth.ok, true)
-  if (!auth.ok) return
-  const spec = specFor(path.join(root, 'does-not-exist'), { type: 'token', credential: 'WB_TEST_SOURCE_TOKEN' })
-  const resolved = resolveSource(spec, root, path.join(root, 'cache'), auth)
-  assert.equal(resolved.dir, null)
-  const error = resolved.error as string
-  assert.match(error, /source 'private-local'/)
-  assert.match(error, /http\.extraheader=<redacted>/)
-  assert.ok(!error.includes(TOKEN))
-  assert.ok(!error.includes(BASIC))
-  assert.deepEqual(redactArgs(['-c', 'http.extraheader=Authorization: Basic abc']), ['-c', 'http.extraheader=<redacted>'])
-})
-
-test('github-app: RS256 JWT + installation token minted through the documented REST flow', async () => {
-  const root = tmpRoot()
-  const { privateKey } = generateKeyPairSync('rsa', {
+function rsaKey(): string {
+  return generateKeyPairSync('rsa', {
     modulusLength: 2048,
     publicKeyEncoding: { type: 'spki', format: 'pem' },
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-  })
-  process.env.WB_TEST_APP_KEY = privateKey
+  }).privateKey
+}
 
-  const jwt = githubAppJwt({ appId: 3967918, privateKey, now: 1_000_000 })
-  const [header, claims, signature] = jwt.split('.')
-  assert.equal(JSON.parse(Buffer.from(header, 'base64url').toString('utf8')).alg, 'RS256')
-  assert.equal(JSON.parse(Buffer.from(claims, 'base64url').toString('utf8')).iss, '3967918')
-  assert.equal(JSON.parse(Buffer.from(claims, 'base64url').toString('utf8')).exp, 1540)
-  assert.ok((signature as string).length > 100)
+test('source auth: a token credential becomes a transient git auth argument', async () => {
+  const auth = await resolveSourceAuth(
+    { credential: 'demo-token', type: 'token' },
+    { credentials: consumer({ 'demo-token': TOKEN }) },
+  )
+  assert.equal(auth.ok, true)
+  assert.ok(auth.ok)
+  assert.match(auth.mechanism, /token credential 'demo-token'/)
+  assert.equal(auth.credential, 'demo-token')
+  assert.equal(auth.provider, 'fixture')
+  // No configured helper may persist anything.
+  assert.ok(auth.args.includes('credential.helper='))
+  const header = auth.args.find((arg) => arg.startsWith('http.extraheader='))
+  assert.ok(header !== undefined)
+  const encoded = header.slice('http.extraheader='.length)
+  assert.ok(encoded.startsWith('Authorization: Basic '))
+  const decoded = Buffer.from(encoded.slice('Authorization: Basic '.length), 'base64').toString()
+  assert.match(decoded, /^[^:]+:/)
+  assert.equal(decoded.slice(decoded.indexOf(':') + 1), TOKEN)
+  // The VALUE never appears in the arguments, and the reporting path redacts.
+  assert.ok(!auth.args.some((arg) => arg.includes(TOKEN)))
+  assert.ok(!redactArgs(auth.args).includes(header))
+})
 
-  clearInstallationTokenCache()
-  let calls = 0
-  const fetchImpl = (async (url: string | URL, init: RequestInit) => {
-    calls += 1
-    assert.match(String(url), /\/app\/installations\/138119822\/access_tokens$/)
-    const headers = (init.headers ?? {}) as Record<string, string>
-    assert.match(headers.authorization as string, /^Bearer eyJ/)
-    return new Response(JSON.stringify({ token: 'ghs_fakeInstallationToken', expires_at: new Date(Date.now() + 3600_000).toISOString() }), {
-      status: 200,
+test('source auth: a credential no provider can answer fails loudly, naming the reference', async () => {
+  const auth = await resolveSourceAuth(
+    { credential: 'missing-token' },
+    { credentials: consumer({}, ['fixture', 'file']) },
+  )
+  assert.equal(auth.ok, false)
+  assert.ok(!auth.ok)
+  assert.match(auth.error, /missing-token/)
+  assert.match(auth.error, /fixture, file/)
+  assert.match(auth.error, /not found/)
+})
+
+test('source auth: a consumer that throws is reported, never swallowed', async () => {
+  const throwing: CredentialConsumer = {
+    async resolve(): Promise<CredentialResolution | undefined> {
+      throw new Error('the backend is unreachable')
+    },
+    async explain() {
+      throw new Error('not used')
+    },
+    async list() {
+      return []
+    },
+    enabled: () => ['broken'],
+  }
+  const auth = await resolveSourceAuth({ credential: 'demo-token' }, { credentials: throwing })
+  assert.equal(auth.ok, false)
+  assert.ok(!auth.ok)
+  assert.match(auth.error, /demo-token/)
+  assert.match(auth.error, /broken/)
+  assert.match(auth.error, /the backend is unreachable/)
+})
+
+test('source auth: without a credentials consumer the entry fails loudly (no anonymous retry)', async () => {
+  const auth = await resolveSourceAuth({ credential: 'demo-token' })
+  assert.equal(auth.ok, false)
+  assert.ok(!auth.ok)
+  assert.match(auth.error, /demo-token/)
+  assert.match(auth.error, /no plugin implementing the credentials@1 service definition is loaded/)
+})
+
+test('source auth: an invalid reference is a structured error, not a throw', async () => {
+  const auth = await resolveSourceAuth({ credential: '   ' }, { credentials: consumer({}) })
+  assert.equal(auth.ok, false)
+  assert.ok(!auth.ok)
+  assert.match(auth.error, /credential/)
+})
+
+test('source auth (github-app): the key reference is exchanged for a short-lived installation token', async () => {
+  const privateKey = rsaKey()
+  const calls: string[] = []
+  const fetchImpl = (async (url: string | URL) => {
+    calls.push(String(url))
+    return new Response(JSON.stringify({ token: 'ghs_example_installation_token' }), {
+      status: 201,
       headers: { 'content-type': 'application/json' },
     })
   }) as unknown as typeof fetch
 
-  const credentials = bootstrapCredentials({ configDir: root })
-  const authSpec = { type: 'github-app' as const, credential: 'WB_TEST_APP_KEY', appId: 3967918, installationId: 138119822 }
-  const auth = await resolveSourceAuth(authSpec, { credentials, fetchImpl })
-  assert.equal(auth.ok, true)
-  if (!auth.ok) return
-  assert.match(auth.mechanism, /github-app installation token/)
-  assert.ok(!auth.args.join(' ').includes('ghs_fakeInstallationToken'), 'the minted token must not appear in clear text in the git args')
-
-  // A second resolution reuses the cached token (long-running serve: one mint per hour, not per fetch).
-  const second = await resolveSourceAuth(authSpec, { credentials, fetchImpl })
-  assert.equal(second.ok, true)
-  assert.equal(calls, 1)
-
-  // A minting failure names the status and never the key.
-  const failing = (async () => new Response(JSON.stringify({ message: 'Bad credentials' }), { status: 401 })) as unknown as typeof fetch
-  const bad = await resolveSourceAuth({ ...authSpec, appId: 1234, installationId: 5678 }, { credentials, fetchImpl: failing })
-  assert.equal(bad.ok, false)
-  if (bad.ok) return
-  assert.match(bad.error, /HTTP 401/)
-  assert.ok(!bad.error.includes(privateKey.slice(0, 60)))
-})
-
-test('bootstrap set: only core providers can be selected, and a plugin id is a loud error', () => {
-  const root = tmpRoot()
-  assert.deepEqual(bootstrapCredentials({ configDir: root, providers: ['file'] }).enabled(), ['file'])
-  assert.throws(() => bootstrapCredentials({ configDir: root, providers: ['vault'] }), /is not a CORE provider/)
-  assert.throws(() => bootstrapCredentials({ configDir: root, providers: ['env', 'env'] }), /listed twice/)
-})
-
-test('loader: a private git source is discovered with the auth resolved by the bootstrap set', async () => {
-  const root = tmpRoot()
-  const origin = makeRemote(root)
-  process.env.WB_TEST_SOURCE_TOKEN = TOKEN
-  const credentials = bootstrapCredentials({ configDir: root })
-  // The plugin lives under the repository's `plugins/` subtree, the same shape
-  // the dev config uses (`subdir: plugins`).
-  const spec = {
-    ...specFor(origin, { type: 'token', credential: 'WB_TEST_SOURCE_TOKEN' }),
-    subdir: 'plugins',
-  }
-  const config = { sources: [spec] }
-  const sourceAuth = await resolveSourceAuths(config as never, { configDir: root, credentials })
-
-  const report = discoverPlugins({
-    config: config as never,
-    configDir: root,
-    cacheDir: path.join(root, 'cache'),
-    includeExternal: true,
-    sourceAuth,
-    log: () => {},
-  })
-  assert.equal(report.sources[0]?.error, undefined)
-  assert.ok(report.sources[0]?.dir !== null)
-  assert.deepEqual(
-    report.discoveries.map((discovery) => discovery.name),
-    ['hello-private'],
+  const auth = await resolveSourceAuth(
+    { credential: APP_KEY_REF, type: 'github-app', appId: 3967918, installationId: 138119822 },
+    { credentials: consumer({ [APP_KEY_REF]: privateKey }), fetchImpl },
   )
-  assert.equal(report.discoveries[0]?.source, 'private-local')
+  assert.equal(auth.ok, true)
+  assert.ok(auth.ok)
+  assert.match(auth.mechanism, /github-app installation token/)
+  assert.match(auth.mechanism, /3967918/)
+  assert.equal(auth.credential, APP_KEY_REF)
+  assert.equal(calls.length, 1)
+  assert.match(calls[0]!, /\/app\/installations\/138119822\/access_tokens$/)
+  // The minted TOKEN is in the args, the private KEY (the credential value) is not.
+  const joined = auth.args.join(' ')
+  assert.ok(!joined.includes(privateKey.split('\n')[1]!))
+})
 
-  // The SAME walk WITHOUT the resolved auth: the source is skipped loudly and
-  // NOTHING is fetched. This is the regression the test exists for - the loader
-  // must thread the caller-resolved auth into resolveSource (a source that
-  // declares `auth` is never fetched anonymously).
-  const anonymous = discoverPlugins({
-    config: config as never,
-    configDir: root,
-    cacheDir: path.join(root, 'cache-anonymous'),
-    includeExternal: true,
-    log: () => {},
+test('githubAppJwt signs an RS256 JWT for the app id', () => {
+  const jwt = githubAppJwt({ appId: 3967918, privateKey: rsaKey(), now: 1_700_000_000 })
+  const parts = jwt.split('.')
+  assert.equal(parts.length, 3)
+  const header = JSON.parse(Buffer.from(parts[0]!, 'base64url').toString()) as { alg?: string; typ?: string }
+  const payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString()) as { iss?: unknown; iat?: number; exp?: number }
+  assert.equal(header.alg, 'RS256')
+  assert.equal(String(payload.iss), '3967918')
+  assert.ok((payload.exp ?? 0) > (payload.iat ?? 0))
+  assert.ok(parts[2]!.length > 100)
+})
+
+test('githubAppInstallationToken mints through the GitHub App REST flow', async () => {
+  // The github-app RESOLUTION test above minted a token for the SAME
+  // app/installation: the token cache is process wide, so clear it to mint here.
+  clearInstallationTokenCache()
+  const calls: Array<{ url: string; method?: string }> = []
+  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), method: init?.method })
+    return new Response(JSON.stringify({ token: 'ghs_minted', expires_at: new Date(Date.now() + 3_600_000).toISOString() }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    })
+  }) as unknown as typeof fetch
+  const minted = await githubAppInstallationToken({
+    appId: 3967918,
+    installationId: 138119822,
+    privateKey: rsaKey(),
+    fetchImpl,
   })
-  assert.deepEqual(anonymous.discoveries, [])
-  assert.match(anonymous.sources[0]?.error as string, /declares 'auth' but no credential was resolved/)
-  assert.equal(fs.existsSync(path.join(root, 'cache-anonymous', 'private-local')), false)
+  assert.equal(minted.token, 'ghs_minted')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0]!.method, 'POST')
+  assert.match(calls[0]!.url, /^https:\/\/api\.github\.com\/app\/installations\/138119822\/access_tokens$/)
+})
+
+test('gitAuthArgs never persists the token: no helper, no url credential', () => {
+  const args = gitAuthArgs('example-token', 'x-access-token')
+  assert.ok(args.includes('credential.helper='))
+  const header = args.find((arg) => arg.startsWith('http.extraheader='))!
+  assert.equal(
+    Buffer.from(header.slice('http.extraheader='.length).replace('Authorization: Basic ', ''), 'base64').toString(),
+    'x-access-token:example-token',
+  )
+  assert.ok(!args.some((arg) => arg.includes('https://')))
+})
+
+test('resolveSourceAuths resolves only the sources that declare auth, keyed by source id', async () => {
+  const config = {
+    sources: [
+      { kind: 'git', id: 'private-plugins', url: 'https://github.invalid/x.git', auth: { credential: 'demo-token' } },
+      { kind: 'path', id: 'open-plugins', path: './plugins' },
+    ],
+    plugins: {},
+  } as unknown as WorkbenchConfig
+  const auths = await resolveSourceAuths(config, { configDir: '/config', credentials: consumer({ 'demo-token': TOKEN }) })
+  assert.deepEqual([...auths.keys()], [sourceId(config.sources[0]!, '/config')])
+  assert.equal(auths.get(sourceId(config.sources[0]!, '/config'))?.ok, true)
 })

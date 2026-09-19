@@ -25,8 +25,8 @@ import {
   validateArgs,
   type ParameterSchemaSpec,
   type ToolInfo,
-} from '../src/tools/definition.ts'
-import { registerToolRoutes } from '../src/tools/http.ts'
+} from '../src/tool-registry.ts'
+import { registerToolRoutes } from '../src/tool-routes.ts'
 import { WEB, Web } from '../src/web/definition.ts'
 import { createWebServer } from '../src/web/providers/http.ts'
 

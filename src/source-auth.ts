@@ -202,9 +202,9 @@ export async function resolveSourceAuth(auth: SourceAuthSpec, options: SourceAut
     return {
       ok: false,
       error:
-        `credential '${label}' (type ${type}) cannot be resolved: this run has no BOOTSTRAP credential set. A source credential ` +
-        `must be resolvable BEFORE plugins load (the source fetch happens first); the bootstrap set is the core provider list ` +
-        `('credentials.bootstrap'), configured from the 'plugins.<provider>' sections`,
+        `credential '${label}' (type ${type}) cannot be resolved: no plugin implementing the credentials@1 service definition is loaded. A source credential is resolved through the LIVE ` +
+        `credentials service, and the core ships NO provider: load a credentials provider plugin (from the PUBLIC ` +
+        `nexuslbs/workbench-plugins repo) through a source that needs no credential, then this source becomes loadable`,
     }
   }
 
@@ -214,14 +214,14 @@ export async function resolveSourceAuth(auth: SourceAuthSpec, options: SourceAut
   } catch (error) {
     return {
       ok: false,
-      error: `credential '${label}' could not be resolved by the bootstrap providers (${credentials.enabled().join(', ') || 'none'}): ${message(error)}`,
+      error: `credential '${label}' could not be resolved by the credentials providers (${credentials.enabled().join(', ') || 'none'}): ${message(error)}`,
     }
   }
   if (resolution === undefined) {
     return {
       ok: false,
       error:
-        `credential '${label}' was not found by any bootstrap provider (${credentials.enabled().join(', ') || 'none'}); ` +
+        `credential '${label}' was not found by any credentials provider (${credentials.enabled().join(', ') || 'none'}); ` +
         `export it (env provider) or list it in the configured credentials file`,
     }
   }

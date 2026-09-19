@@ -31,8 +31,8 @@
  * the routes on a `Web` service and returns their disposer, exactly like any
  * other consumer. It adds no product feature to the core.
  */
-import type { Web, WebRequest, WebResponse } from '../web/definition.ts'
-import { TOOLS_CONTRACT, ToolArgsError, ToolUnknownError, type ToolInfo } from './definition.ts'
+import type { Web, WebRequest, WebResponse } from './web/definition.ts'
+import { TOOLS_CONTRACT, ToolArgsError, ToolUnknownError, type ToolInfo } from './tool-registry.ts'
 
 /** The capability this module serves: the registry with its single dispatch. */
 export interface ToolSource {

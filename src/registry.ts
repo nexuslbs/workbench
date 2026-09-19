@@ -1,4 +1,4 @@
-import { ToolRegistry, type ToolDefinition, type ToolInfo } from './tools/definition.ts'
+import { ToolRegistry, type ToolDefinition, type ToolInfo } from './tool-registry.ts'
 import type { CommandDefinition, LoadedPlugin } from './types.ts'
 
 /**

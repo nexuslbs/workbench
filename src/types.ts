@@ -1,5 +1,5 @@
 import type { Context } from 'cordis'
-import type { ParameterSchemaSpec, ToolDefinition, ToolInfo } from './tools/definition.ts'
+import type { ParameterSchemaSpec, ToolDefinition, ToolInfo } from './tool-registry.ts'
 
 /** Manifest file name, one per plugin directory. */
 export const MANIFEST_FILE = 'workbench.plugin.json'
@@ -176,62 +176,6 @@ export interface CredentialsConfig {
   providers?: string[]
   /** Default scope for `${cred:NAME}` references that do not carry one. */
   scope?: string
-  /**
-   * BOOTSTRAP provider ids, in precedence order: the providers usable BEFORE
-   * any plugin is loaded. A `git` source is fetched before plugin discovery, so
-   * a credential needed to FETCH a source cannot come from a plugin-provided
-   * provider (that provider is itself discovered in a source). Only CORE
-   * provider ids (`env`, `file`, `project-env`, `user-env`) can be listed here;
-   * the kernel raises a clear error for anything else. Default: every core
-   * provider, in declaration order.
-   */
-  bootstrap?: string[]
-}
-
-/**
- * The `email` section of the workbench config: EMAIL PROVIDER SELECTION, the
- * only thing that decides which email provider answers. Adding/swapping/
- * disabling a provider is a config edit, never a code change; the accounts of
- * a provider are its own plugin configuration.
- */
-export interface EmailConfig {
-  /**
-   * Provider ids, in precedence order. Only the listed providers are ENABLED; a
-   * provider id that no plugin declares is a config error. Omit (or leave
-   * empty) to enable every declared provider in declaration order.
-   */
-  providers?: string[]
-}
-
-/**
- * The `totp` section of the workbench config: TOTP PROVIDER SELECTION, the only
- * thing that decides which totp provider answers. Adding/swapping/disabling a
- * provider is a config edit, never a code change; the ENTRIES (label + key
- * reference) are the provider's own plugin configuration and never appear here.
- */
-export interface TotpConfig {
-  /**
-   * Provider ids, in precedence order. Only the listed providers are ENABLED; a
-   * provider id that no plugin declares is a config error. Omit (or leave
-   * empty) to enable every declared provider in declaration order.
-   */
-  providers?: string[]
-}
-
-/**
- * The `sms` section of the workbench config: SMS PROVIDER SELECTION, the only
- * thing that decides which sms provider answers. Adding/swapping/disabling a
- * provider is a config edit, never a code change; the NUMBERS (label + phone
- * number + credential reference) are the provider's own plugin configuration
- * and never appear here.
- */
-export interface SmsConfig {
-  /**
-   * Provider ids, in precedence order. Only the listed providers are ENABLED; a
-   * provider id that no plugin declares is a config error. Omit (or leave
-   * empty) to enable every declared provider in declaration order.
-   */
-  providers?: string[]
 }
 
 /** A plugin the loader could not load: reported, never fatal. */
@@ -407,11 +351,8 @@ export interface WorkbenchConfig {
   /** Web UI section (see {@link WebConfig}); absent keeps the historical behaviour. */
   web?: WebConfig
   /** Email provider selection (see {@link EmailConfig}); absent enables every declared provider. */
-  email?: EmailConfig
   /** TOTP provider selection (see {@link TotpConfig}); absent enables every declared provider. */
-  totp?: TotpConfig
   /** SMS provider selection (see {@link SmsConfig}); absent enables every declared provider. */
-  sms?: SmsConfig
 }
 
 /**

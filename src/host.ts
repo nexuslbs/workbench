@@ -24,7 +24,7 @@ import { readConfig } from './config.ts'
 import { readRawConfig, updateConfigFile } from './configfile.ts'
 import { discoverPlugins, isDisabled, isRosterMember, loadDiscovered, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { resolveSource, sourceId, type SourceAuthOutcome } from './sources.ts'
-import type { ToolInfo } from './tools/definition.ts'
+import type { ToolInfo } from './tool-registry.ts'
 import {
   renderCapability,
   type CommandInfo,
@@ -69,15 +69,14 @@ export interface HostOptions {
    */
   pluginConfig?: (name: string, raw: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>
   /**
-   * Source AUTH resolved before the boot walk (bootstrap credential set). A
+   * Source AUTH resolved before the boot walk (the LIVE credentials service). A
    * `git` source that declares `auth` is fetched with it; the host re-resolves
    * it after a config change through {@link HostOptions.sourceAuthResolver}.
    */
   sourceAuth?: ReadonlyMap<string, SourceAuthOutcome>
   /**
-   * Re-resolves source auth for a config: the BOOTSTRAP credential set
-   * (`src/credentials/providers/bootstrap.ts`) - core providers only, NO plugin loaded -
-   * because a source is fetched before plugin discovery. Injected by the kernel
+   * Re-resolves source auth for a config: the LIVE credentials service (a provider
+   * plugin, loaded from a source that needs no credential). Injected by the kernel
    * (composition root) so the host never names a provider.
    */
   sourceAuthResolver?: (config: WorkbenchConfig) => Promise<ReadonlyMap<string, SourceAuthOutcome>>
@@ -542,7 +541,7 @@ export class Host implements HostApi {
       // Resolving the source before persisting it validates the coordinate (a
       // git source is checked out into the cache here, by the loader, not by us).
       // The new source goes into a CANDIDATE config first so its own `auth` (a
-      // private git source) is resolved by the BOOTSTRAP set before the fetch.
+      // private git source) is resolved through the credentials service before the fetch.
       const candidate: WorkbenchConfig = { ...raw, sources: [...raw.sources, spec] }
       const auth = (await this.resolveAuths(candidate)).get(sourceId(spec, this.options.configDir))
       const resolved = resolveSource(spec, this.options.configDir, this.options.cacheDir, auth)

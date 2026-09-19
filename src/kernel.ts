@@ -3,16 +3,12 @@ import { Context } from 'cordis'
 import { expandCredentialRefsDeep, findDefaultConfigFile, readConfig } from './config.ts'
 import { readRawConfig, updateConfigFile } from './configfile.ts'
 import { Credentials, CREDENTIALS, CREDENTIALS_VERSION, type CredentialRef, type CredentialsService } from './credentials/definition.ts'
-import { CORE_PROVIDERS, registerCoreProviders } from './credentials/providers/index.ts'
-import { bootstrapCredentials } from './credentials/providers/bootstrap.ts'
-import { EMAIL, EMAIL_VERSION, Email, type EmailService } from './email/definition.ts'
-import { TOTP, TOTP_VERSION, Totp, type TotpService } from './totp/definition.ts'
-import { SMS, SMS_VERSION, Sms, type SmsService } from './sms/definition.ts'
 import { Host } from './host.ts'
 import { loadPlugins, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { resolveSourceAuths } from './source-auth.ts'
+import { sourceId, type SourceAuthOutcome } from './sources.ts'
 import { CommandRegistry } from './registry.ts'
-import { registerToolRoutes } from './tools/http.ts'
+import { registerToolRoutes } from './tool-routes.ts'
 import { WEB, DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, Web, type WebHandler } from './web/definition.ts'
 import { createWebServer, type WebServer } from './web/providers/http.ts'
 import type { ConfigApi, LoadedPlugin, Workbench, WorkbenchConfig } from './types.ts'
@@ -67,20 +63,6 @@ export interface Kernel {
    * (`register`). Also reachable as `ctx.email` from any plugin
    * (inject: ['email']).
    */
-  email: EmailService
-  /**
-   * The TOTP capability (`totp@1`): what consumers call (`entries`, `code`) and
-   * what provider plugins register with (`register`). Also reachable as
-   * `ctx.totp` from any plugin (inject: ['totp']).
-   */
-  totp: TotpService
-  /**
-   * The SMS capability (`sms@1`): what consumers call (`numbers`, `list`,
-   * `get`, `code`, `search`) and what provider plugins register with
-   * (`register`). Also reachable as `ctx.sms` from any plugin
-   * (inject: ['sms']).
-   */
-  sms: SmsService
   /**
    * The host (loader) API: the live plugin set and every mutation of it
    * (load/unload/reload/retry/enable/disable/install/uninstall). Also reachable
@@ -107,21 +89,6 @@ export interface Kernel {
 /** True when a discovered plugin claims a credential provider id. */
 function declaresCredentialProvider(discovery: PluginDiscovery): boolean {
   return discovery.capabilities.some((capability) => capability.id === CREDENTIALS && capability.provider !== undefined)
-}
-
-/** True when a discovered plugin claims an EMAIL provider id (capability `email`). */
-function declaresEmailProvider(discovery: PluginDiscovery): boolean {
-  return discovery.capabilities.some((capability) => capability.id === EMAIL && capability.provider !== undefined)
-}
-
-/** True when a discovered plugin claims a TOTP provider id (capability `totp`). */
-function declaresTotpProvider(discovery: PluginDiscovery): boolean {
-  return discovery.capabilities.some((capability) => capability.id === TOTP && capability.provider !== undefined)
-}
-
-/** True when a discovered plugin claims an SMS provider id (capability `sms`). */
-function declaresSmsProvider(discovery: PluginDiscovery): boolean {
-  return discovery.capabilities.some((capability) => capability.id === SMS && capability.provider !== undefined)
 }
 
 /**
@@ -164,29 +131,6 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // that is the provider's job, started by `startWeb`.
   let web!: Web
   await ctx.plugin({ name: WEB, apply: (c) => { web = new Web(c) } })
-
-  // The EMAIL capability seam (the definition): the service exists as soon as
-  // the kernel boots, so a provider plugin can register with it and a consumer
-  // plugin can call `ctx.email`. No backend, no mailbox and no socket here - a
-  // provider is a plugin from any source, selected by configuration.
-  let email!: EmailService
-  await ctx.plugin({ name: EMAIL, apply: (c) => { email = new Email(c) } })
-
-  // The TOTP capability seam (the definition): same shape as email. The service
-  // exists as soon as the kernel boots, so a totp provider plugin can register
-  // with it and a consumer plugin can call `ctx.totp`. It holds NO key, no
-  // storage and no code generator - a provider is a plugin from any source,
-  // selected by configuration.
-  let totp!: TotpService
-  await ctx.plugin({ name: TOTP, apply: (c) => { totp = new Totp(c) } })
-
-  // The SMS capability seam (the definition): same shape as email and totp. The
-  // service exists as soon as the kernel boots, so an sms provider plugin can
-  // register with it and a consumer plugin can call `ctx.sms`. It holds NO
-  // number, no credential and no transport - a provider is a plugin from any
-  // source, selected by configuration.
-  let sms!: SmsService
-  await ctx.plugin({ name: SMS, apply: (c) => { sms = new Sms(c) } })
 
   // The by-name TOOL INVOCATION surface: the registered tools belong to the
   // plugins, the routes are the core's contract for them. Registered here (the
@@ -241,24 +185,16 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     },
   })
 
-  // The credentials service: the definition's default implementation plus the
-  // DECLARATIONS of the core providers (they are core modules, not plugins of a
-  // source, so the kernel declares them; their registrations follow).
+  // The credentials service: the DEFINITION's own implementation (the routing
+  // walk, no backend) and NOTHING else. The core declares and registers NO
+  // provider - no env, no file, no store, no resolver - because a provider is a
+  // plugin from a source (operator rule 2026-09-19). Only after such a plugin is
+  // loaded may a `${cred:...}` source or plugin be resolved (the gate below).
   let credentials!: CredentialsService
   await ctx.plugin({
     name: CREDENTIALS,
     apply: (c) => {
       credentials = new Credentials(c)
-      for (const provider of CORE_PROVIDERS) {
-        credentials.declare({
-          provider: provider.id,
-          version: CREDENTIALS_VERSION,
-          plugin: 'workbench-core',
-          source: 'core',
-          external: false,
-        })
-      }
-      registerCoreProviders(c as Context & { credentials: CredentialsService }, config.plugins, configDir)
     },
   })
 
@@ -266,17 +202,45 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const expansionOptions = config.credentials?.scope === undefined ? {} : { scope: config.credentials.scope }
   const resolver = { resolve: (ref: CredentialRef) => credentials.resolve(ref), enabled: () => credentials.enabled() }
 
-  // BOOTSTRAP credential set: the providers usable BEFORE any plugin is loaded.
-  // A `git` source is fetched before plugin discovery, so a source credential
-  // cannot come from a plugin-provided credentials provider (that provider is
-  // itself discovered in a source). Same definition, no cordis, no plugin.
-  const bootstrapFor = (raw: WorkbenchConfig) =>
-    bootstrapCredentials({ configDir, providers: raw.credentials?.bootstrap, plugins: raw.plugins ?? {} })
-  const sourceAuthResolver = (raw: WorkbenchConfig) =>
-    resolveSourceAuths(raw, { configDir, credentials: bootstrapFor(raw) })
-  // Resolved BEFORE the host exists and before the first source walk: this is
-  // what makes a private source fetchable with no plugin loaded.
-  const sourceAuth = await sourceAuthResolver(config)
+  // ---------------------------------------------------------------------------
+  // `${cred:...}` GATING (operator rule, 2026-09-19): an entry whose config needs
+  // a credential IMPLICITLY DEPENDS on a plugin implementing the credentials@1
+  // service definition. The core ships NO credential provider, so such an entry
+  // is DEFERRED until a provider plugin has been loaded - from a source that
+  // needs no credential. That is what breaks the bootstrap chicken-and-egg: the
+  // provider implementation lives in the PUBLIC plugins repo, is fetchable from
+  // a remote source WITHOUT credentials, and only then do the `${cred:...}`
+  // sources and plugins become loadable. A missing/invalid credential of an
+  // ALREADY loaded provider is still a loud error (never a silent skip).
+  // ---------------------------------------------------------------------------
+  const needsCredential = (raw: unknown): boolean => {
+    const record = (raw ?? {}) as { auth?: unknown }
+    if (record.auth !== undefined) return true
+    return JSON.stringify(raw ?? null).includes('${cred:')
+  }
+  const gatedSources = config.sources.filter(needsCredential)
+  const openSources = config.sources.filter((source) => !needsCredential(source))
+  const hasProvider = (): boolean => credentials.providers().some((provider) => provider.registered)
+  const logDeferral = (id: string): void =>
+    log(
+      `[workbench] source '${id}' is DEFERRED: its config needs a credential (${'${cred:...}'} / auth) but no plugin ` +
+        `implementing credentials@1 is loaded yet; load a credentials provider plugin (credentials-basic) from a ` +
+        `source that needs no credential and the source becomes eligible`,
+    )
+  const deferredSourceReports: SourceReport[] = []
+  // The source auth map is FILLED in two steps: the sources that need no
+  // credential are walked first (that is where the provider plugin comes from),
+  // then, only when a provider is registered, the credential-dependent ones.
+  const sourceAuth = new Map<string, SourceAuthOutcome>()
+  // Re-resolution used by the host after a config change (Settings/install): the
+  // LIVE credentials service, and ONLY once a provider plugin is registered - the
+  // same gate as the boot path. With no provider the map stays EMPTY and a
+  // credential-dependent source is reported LOUDLY by the loader (never a silent
+  // anonymous retry).
+  const sourceAuthResolver = (raw: WorkbenchConfig): Promise<ReadonlyMap<string, SourceAuthOutcome>> =>
+    hasProvider()
+      ? resolveSourceAuths(raw, { configDir, credentials })
+      : Promise.resolve(new Map<string, SourceAuthOutcome>())
 
   // The HOST: the live plugin set and the single mutation path. It exists before
   // the plugins load so `ctx.workbench.host()` / `.inventory()` already work
@@ -298,35 +262,6 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
           external: discovery.external,
         })
         continue
-      }
-      if (capability.id === EMAIL) {
-        email.declare({
-          provider: capability.provider,
-          version: capability.version ?? EMAIL_VERSION,
-          plugin: discovery.name,
-          source: discovery.source,
-          external: discovery.external,
-        })
-        continue
-      }
-      if (capability.id === TOTP) {
-        totp.declare({
-          provider: capability.provider,
-          version: capability.version ?? TOTP_VERSION,
-          plugin: discovery.name,
-          source: discovery.source,
-          external: discovery.external,
-        })
-        continue
-      }
-      if (capability.id === SMS) {
-        sms.declare({
-          provider: capability.provider,
-          version: capability.version ?? SMS_VERSION,
-          plugin: discovery.name,
-          source: discovery.source,
-          external: discovery.external,
-        })
       }
     }
   }
@@ -392,25 +327,62 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     declare: declarePluginCapabilities,
   }
 
-  // Phase 1: the plugins that PROVIDE a capability (core modules are already
-  // in), so that both the selection below and the config references can see them.
+  // Phase 1: the plugins that PROVIDE the credentials capability, from the
+  // sources that need no credential (the core ships no provider module).
   const providers = await loadPlugins(ctx, {
     ...loadOptions,
-    filter: (discovery) =>
-      declaresCredentialProvider(discovery) ||
-      declaresEmailProvider(discovery) ||
-      declaresTotpProvider(discovery) ||
-      declaresSmsProvider(discovery),
+    config: { ...config, sources: openSources },
+    filter: (discovery) => declaresCredentialProvider(discovery),
   })
+
+  // THE GATE: resolve the credential-dependent sources through the LIVE
+  // credentials service, and only once a provider plugin is registered. With no
+  // provider plugin the entry is DEFERRED (structured log + source report), it
+  // is NOT a failure and NOT a silent skip, and the core keeps serving.
+  const gatedReady = gatedSources.length > 0 && hasProvider()
+  if (gatedSources.length > 0 && gatedReady) {
+    const auths = await resolveSourceAuths({ ...config, sources: gatedSources }, { configDir, credentials })
+    for (const [id, outcome] of auths) sourceAuth.set(id, outcome)
+  } else if (gatedSources.length > 0) {
+    for (const source of gatedSources) {
+      const id = sourceId(source, configDir)
+      logDeferral(id)
+      deferredSourceReports.push({
+        id,
+        kind: source.kind,
+        dir: null,
+        external: source.external !== false,
+        plugins: 0,
+        error: 'deferred: the config needs a credential but no plugin implementing credentials@1 is loaded',
+      })
+    }
+  }
   // Provider selection and precedence: CONFIGURATION only, never code.
-  credentials.setEnabled(config.credentials?.providers)
-  email.setEnabled(config.email?.providers)
-  totp.setEnabled(config.totp?.providers)
-  sms.setEnabled(config.sms?.providers)
+  if (hasProvider()) credentials.setEnabled(config.credentials?.providers)
+  const activeSources = gatedReady ? [...openSources, ...gatedSources] : openSources
 
   // The config loader consumes the capability: `${cred:NAME}`.
+  // Plugin-level gating: a `plugins.<name>` row whose config uses a credential
+  // reference has the SAME implicit dependency as a source. With no provider
+  // plugin loaded the row is DEFERRED: it is kept out of the roster (so the
+  // plugin stays AVAILABLE, not loaded), the deferral is LOGGED, and nothing
+  // crashes - never a silent skip.
+  const refToken = '$' + '{cred:'
+  const gatedPluginNames = hasProvider()
+    ? []
+    : Object.entries(config.plugins ?? {})
+        .filter(([, raw]) => JSON.stringify(raw ?? null).includes(refToken))
+        .map(([name]) => name)
+  const roster: Record<string, Record<string, unknown>> = { ...(config.plugins ?? {}) }
+  for (const name of gatedPluginNames) {
+    delete roster[name]
+    log(
+      `[workbench] plugin '${name}' is DEFERRED: its config needs a credential (` + refToken + `...) but no plugin ` +
+        `implementing credentials@1 is loaded yet; load a credentials provider plugin and the plugin becomes eligible`,
+    )
+  }
   const expanded = (await expandCredentialRefsDeep(
-    { sources: config.sources, plugins: config.plugins ?? {} },
+    { sources: activeSources, plugins: roster },
     resolver,
     expansionOptions,
   )) as { sources: WorkbenchConfig['sources']; plugins: Record<string, Record<string, unknown>> }
@@ -420,19 +392,18 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const rest = await loadPlugins(ctx, {
     ...loadOptions,
     config: effective,
-    // A capability-providing plugin was already applied in phase 1; applying it
+    // A credentials-providing plugin was already applied in phase 1; applying it
     // again would make its registration fail as a duplicate.
-    filter: (discovery) =>
-      !declaresCredentialProvider(discovery) &&
-      !declaresEmailProvider(discovery) &&
-      !declaresTotpProvider(discovery) &&
-      !declaresSmsProvider(discovery),
+    filter: (discovery) => !declaresCredentialProvider(discovery),
   })
 
   const plugins: LoadedPlugin[] = [...providers.plugins, ...rest.plugins]
   const counts = new Map<string, number>()
   for (const plugin of plugins) counts.set(plugin.source, (counts.get(plugin.source) ?? 0) + 1)
-  const sources: SourceReport[] = rest.sources.map((source) => ({ ...source, plugins: counts.get(source.id) ?? 0 }))
+  const sources: SourceReport[] = [
+    ...rest.sources.map((source) => ({ ...source, plugins: counts.get(source.id) ?? 0 })),
+    ...deferredSourceReports,
+  ]
   registry.setPlugins(plugins)
 
   const fibers = new Map(providers.fibers)
@@ -456,9 +427,6 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     registry,
     credentials,
     web,
-    email,
-    totp,
-    sms,
     host,
     configFile,
     get config(): WorkbenchConfig {
