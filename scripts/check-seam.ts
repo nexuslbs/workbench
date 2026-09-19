@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /**
- * Seam enforcement for the credentials capability (and any future capability
- * that uses the same three-role shape):
+ * Seam enforcement for the capabilities that use the three-role shape
+ * (credentials, email, and any future capability of the same form):
  *
  *        Provider  ->  Definition  <-  Consumer
  *
- * Roles by file:
- *   definition = src/credentials/definition.ts
- *   provider   = a module under src/credentials/providers/ (or a plugin from
+ * Roles by file (one capability per `src/<capability>/` directory):
+ *   definition = src/<capability>/definition.ts
+ *   provider   = a module under src/<capability>/providers/ (or a plugin from
  *                another repository - this check cannot see those, which is why
  *                the contract is also documented in docs/PLUGIN-CONTRACT.md)
- *   consumer   = a module that uses the capability (src/config.ts, src/cli.ts)
+ *   consumer   = a module that uses a capability (src/config.ts, src/cli.ts)
  *   plugin     = plugins/**  (a plugin is always a consumer of core services)
  *   root       = src/kernel.ts, src/index.ts  (the COMPOSITION ROOT: wiring the
  *                providers in is exactly its job, so it may import both sides)
@@ -31,8 +31,16 @@ import { fileURLToPath } from 'node:url'
 
 const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-const DEFINITION = 'src/credentials/definition.ts'
-const PROVIDERS_DIR = 'src/credentials/providers/'
+/**
+ * The capabilities that use the three-role seam, each one a directory under
+ * `src/`: a definition module, optional core provider modules, and consumers.
+ * Adding a capability here is what puts it under the check.
+ */
+const CAPABILITIES = ['credentials', 'email']
+/** Definition modules: `src/<capability>/definition.ts`. */
+const DEFINITIONS = CAPABILITIES.map((capability) => `src/${capability}/definition.ts`)
+/** Provider modules: `src/<capability>/providers/` (a provider may also live in another repo). */
+const PROVIDER_DIRS = CAPABILITIES.map((capability) => `src/${capability}/providers/`)
 const CONSUMERS = ['src/config.ts', 'src/cli.ts']
 const COMPOSITION_ROOT = ['src/kernel.ts', 'src/index.ts']
 const PLUGINS_DIR = 'plugins/'
@@ -41,8 +49,8 @@ type Layer = 'definition' | 'provider' | 'consumer' | 'plugin' | 'root' | 'other
 
 /** Relative paths are matched on '/'; unknown files are `other` (not role bound). */
 function layerOf(relative: string): Layer {
-  if (relative === DEFINITION) return 'definition'
-  if (relative.startsWith(PROVIDERS_DIR)) return 'provider'
+  if (DEFINITIONS.includes(relative)) return 'definition'
+  if (PROVIDER_DIRS.some((dir) => relative.startsWith(dir))) return 'provider'
   if (CONSUMERS.includes(relative)) return 'consumer'
   if (COMPOSITION_ROOT.includes(relative)) return 'root'
   if (relative.startsWith(PLUGINS_DIR)) return 'plugin'

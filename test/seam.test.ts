@@ -60,6 +60,34 @@ test('the check FAILS when a PLUGIN imports a PROVIDER module', () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
+test('the check FAILS when a CONSUMER imports an EMAIL provider module', () => {
+  const root = fixtureRoot({
+    'src/email/providers/himalaya.ts': 'export const himalaya = 1\n',
+    'src/cli.ts': "import { himalaya } from './email/providers/himalaya.ts'\nexport const cli = himalaya\n",
+  })
+  assert.deepEqual(summary(root), ['src/cli.ts (consumer) -> src/email/providers/himalaya.ts (provider)'])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('the check FAILS when a PLUGIN imports the EMAIL provider module of another capability', () => {
+  const root = fixtureRoot({
+    'src/email/providers/himalaya.ts': 'export const himalaya = 1\n',
+    'src/email/definition.ts': 'export const definition = 1\n',
+    'plugins/email-tools/index.ts': "import { himalaya } from '../../src/email/providers/himalaya.ts'\nexport default himalaya\n",
+  })
+  assert.deepEqual(summary(root), ['plugins/email-tools/index.ts (plugin) -> src/email/providers/himalaya.ts (provider)'])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('the check FAILS when the EMAIL DEFINITION imports a consumer (the contract depends on nobody)', () => {
+  const root = fixtureRoot({
+    'src/config.ts': 'export const config = 1\n',
+    'src/email/definition.ts': "import { config } from '../config.ts'\nexport const definition = config\n",
+  })
+  assert.deepEqual(summary(root), ['src/email/definition.ts (definition) -> src/config.ts (consumer)'])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
 test('the check FAILS when the DEFINITION imports a consumer (the contract depends on nobody)', () => {
   const root = fixtureRoot({
     'src/cli.ts': 'export const cli = 1\n',

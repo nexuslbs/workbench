@@ -5,6 +5,7 @@ import { readRawConfig, updateConfigFile } from './configfile.ts'
 import { Credentials, CREDENTIALS, CREDENTIALS_VERSION, type CredentialRef, type CredentialsService } from './credentials/definition.ts'
 import { CORE_PROVIDERS, registerCoreProviders } from './credentials/providers/index.ts'
 import { bootstrapCredentials } from './credentials/providers/bootstrap.ts'
+import { EMAIL, EMAIL_VERSION, Email, type EmailService } from './email/definition.ts'
 import { Host } from './host.ts'
 import { loadPlugins, type LoadFailure, type PluginDiscovery, type SourceReport } from './loader.ts'
 import { resolveSourceAuths } from './source-auth.ts'
@@ -59,6 +60,13 @@ export interface Kernel {
    */
   web: Web
   /**
+   * The EMAIL capability (`email@1`): what consumers call (`accounts`, `list`,
+   * `get`, `code`, `search`) and what provider plugins register with
+   * (`register`). Also reachable as `ctx.email` from any plugin
+   * (inject: ['email']).
+   */
+  email: EmailService
+  /**
    * The host (loader) API: the live plugin set and every mutation of it
    * (load/unload/reload/retry/enable/disable/install/uninstall). Also reachable
    * as `ctx.workbench.host()` from any plugin.
@@ -84,6 +92,11 @@ export interface Kernel {
 /** True when a discovered plugin claims a credential provider id. */
 function declaresCredentialProvider(discovery: PluginDiscovery): boolean {
   return discovery.capabilities.some((capability) => capability.id === CREDENTIALS && capability.provider !== undefined)
+}
+
+/** True when a discovered plugin claims an EMAIL provider id (capability `email`). */
+function declaresEmailProvider(discovery: PluginDiscovery): boolean {
+  return discovery.capabilities.some((capability) => capability.id === EMAIL && capability.provider !== undefined)
 }
 
 /**
@@ -126,6 +139,13 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // that is the provider's job, started by `startWeb`.
   let web!: Web
   await ctx.plugin({ name: WEB, apply: (c) => { web = new Web(c) } })
+
+  // The EMAIL capability seam (the definition): the service exists as soon as
+  // the kernel boots, so a provider plugin can register with it and a consumer
+  // plugin can call `ctx.email`. No backend, no mailbox and no socket here - a
+  // provider is a plugin from any source, selected by configuration.
+  let email!: EmailService
+  await ctx.plugin({ name: EMAIL, apply: (c) => { email = new Email(c) } })
 
   // The by-name TOOL INVOCATION surface: the registered tools belong to the
   // plugins, the routes are the core's contract for them. Registered here (the
@@ -173,21 +193,33 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   // The HOST: the live plugin set and the single mutation path. It exists before
   // the plugins load so `ctx.workbench.host()` / `.inventory()` already work
   // while a plugin is being applied.
-  // Manifest capability declarations reach the credentials service through this
-  // ONE callback. It must be handed to BOTH the host (a UI-driven load) and the
+  // Manifest capability declarations reach the capability services (credentials
+  // and email) through this ONE callback. It must be handed to BOTH the host (a UI-driven load) and the
   // boot-time load below: the loader calls it right before a plugin is applied,
   // and without it a plugin that provides a capability would register in an
   // UNDECLARED state and fail its own apply (docs/PLUGIN-CONTRACT.md, rule 6).
   const declarePluginCapabilities = (discovery: PluginDiscovery): void => {
     for (const capability of discovery.capabilities) {
-      if (capability.id !== CREDENTIALS || capability.provider === undefined) continue
-      credentials.declare({
-        provider: capability.provider,
-        version: capability.version ?? CREDENTIALS_VERSION,
-        plugin: discovery.name,
-        source: discovery.source,
-        external: discovery.external,
-      })
+      if (capability.provider === undefined) continue
+      if (capability.id === CREDENTIALS) {
+        credentials.declare({
+          provider: capability.provider,
+          version: capability.version ?? CREDENTIALS_VERSION,
+          plugin: discovery.name,
+          source: discovery.source,
+          external: discovery.external,
+        })
+        continue
+      }
+      if (capability.id === EMAIL) {
+        email.declare({
+          provider: capability.provider,
+          version: capability.version ?? EMAIL_VERSION,
+          plugin: discovery.name,
+          source: discovery.source,
+          external: discovery.external,
+        })
+      }
     }
   }
 
@@ -252,11 +284,15 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     declare: declarePluginCapabilities,
   }
 
-  // Phase 1: the plugins that PROVIDE the capability (core modules are already
+  // Phase 1: the plugins that PROVIDE a capability (core modules are already
   // in), so that both the selection below and the config references can see them.
-  const providers = await loadPlugins(ctx, { ...loadOptions, filter: declaresCredentialProvider })
+  const providers = await loadPlugins(ctx, {
+    ...loadOptions,
+    filter: (discovery) => declaresCredentialProvider(discovery) || declaresEmailProvider(discovery),
+  })
   // Provider selection and precedence: CONFIGURATION only, never code.
   credentials.setEnabled(config.credentials?.providers)
+  email.setEnabled(config.email?.providers)
 
   // The config loader consumes the capability: `${cred:NAME}`.
   const expanded = (await expandCredentialRefsDeep(
@@ -267,7 +303,13 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const effective: WorkbenchConfig = { ...config, sources: expanded.sources, plugins: expanded.plugins }
 
   // Phase 2: every other plugin, with the expanded config.
-  const rest = await loadPlugins(ctx, { ...loadOptions, config: effective, filter: (discovery) => !declaresCredentialProvider(discovery) })
+  const rest = await loadPlugins(ctx, {
+    ...loadOptions,
+    config: effective,
+    // A capability-providing plugin was already applied in phase 1; applying it
+    // again would make its registration fail as a duplicate.
+    filter: (discovery) => !declaresCredentialProvider(discovery) && !declaresEmailProvider(discovery),
+  })
 
   const plugins: LoadedPlugin[] = [...providers.plugins, ...rest.plugins]
   const counts = new Map<string, number>()
@@ -296,6 +338,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     registry,
     credentials,
     web,
+    email,
     host,
     configFile,
     get config(): WorkbenchConfig {

@@ -188,6 +188,21 @@ export interface CredentialsConfig {
   bootstrap?: string[]
 }
 
+/**
+ * The `email` section of the workbench config: EMAIL PROVIDER SELECTION, the
+ * only thing that decides which email provider answers. Adding/swapping/
+ * disabling a provider is a config edit, never a code change; the accounts of
+ * a provider are its own plugin configuration.
+ */
+export interface EmailConfig {
+  /**
+   * Provider ids, in precedence order. Only the listed providers are ENABLED; a
+   * provider id that no plugin declares is a config error. Omit (or leave
+   * empty) to enable every declared provider in declaration order.
+   */
+  providers?: string[]
+}
+
 /** A plugin the loader could not load: reported, never fatal. */
 export interface LoadFailure {
   plugin: string
@@ -360,6 +375,8 @@ export interface WorkbenchConfig {
   credentials?: CredentialsConfig
   /** Web UI section (see {@link WebConfig}); absent keeps the historical behaviour. */
   web?: WebConfig
+  /** Email provider selection (see {@link EmailConfig}); absent enables every declared provider. */
+  email?: EmailConfig
 }
 
 /**

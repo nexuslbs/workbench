@@ -381,6 +381,72 @@ a `ParameterSchemaSpec`), the compile step and `validateArgs` follow
 prompt assembly, model-facing schemas, the agent loop, policy guards, scoped
 layers - workbench has no model.
 
+## 4e. Email capability (`ctx.email`)
+
+Email is the second capability that uses the three-role seam (definition,
+provider, consumer), exactly like credentials (4b) and web (4c):
+
+- **Definition** (core, `src/email/definition.ts`, exported from
+  `src/index.ts`): the typed contract, the `email@1` version and the `ctx.email`
+  handle (`inject: ['email']`). It names no protocol, no vendor and no mail CLI:
+  an external provider must be implementable from the definition plus this
+  document alone.
+- **Provider**: an implementation of the contract. Its manifest declares the
+  provider id it answers for - the declaration is what makes
+  `ctx.email.register()` legal, and what makes the provider SELECTABLE by
+  configuration:
+
+  ```json
+  {
+    "name": "email-himalaya",
+    "entry": "index.ts",
+    "capabilities": [{ "id": "email", "version": 1, "provider": "himalaya" }]
+  }
+  ```
+
+  A provider implements `accounts()`, `list(ref?, options?)` and
+  `get(ref, id, options?)`. `code(ref?, options?)` and
+  `search(ref, query, options?)` are OPTIONAL: the definition implements both on
+  top of the required three (`code` reads the newest matching messages and
+  extracts the verification code, `search` filters the envelopes), so a provider
+  overrides them only when its backend can do better.
+- **Consumer**: uses `ctx.email` only, never a provider module. The
+  operator-facing tools are registered by the `email-tools` plugin through
+  `ctx.workbench.registerTool` (4d) as `email accounts`, `email list`,
+  `email get` and `email code`, reachable over HTTP like every other tool.
+
+An account reference is a LABEL (`{ label: 'personal' }`); it never carries an
+address and never a value, and an omitted reference means the provider's default
+account. Where the labels, addresses and credentials come from is CONFIGURATION
+(the provider's own row: `defaultAccount` + `accounts`), never the contract.
+
+```js
+export function apply(ctx, config = {}) {
+  // a CONSUMER: it injects the capability and never imports a provider
+  ctx.inject(['email'], (c) => {
+    c.effect(() => c.workbench.registerTool({
+      name: 'email code',
+      description: 'the verification code of the newest matching message',
+      parameters: {
+        account: { type: 'string', description: 'account label (default: the provider default)' },
+        query: { type: 'string', description: 'subject/from filter', required: true },
+      },
+      handler: async (params) => await c.email.code(
+        params.account ? { label: params.account } : undefined,
+        { query: params.query },
+      ),
+    }))
+  })
+}
+```
+
+The capability is covered by `npm run check:seam` (`email` joins the
+`credentials` definition/provider/consumer rules; the definition imports nothing
+from this package, a consumer or plugin may not import a provider module, and a
+provider may not import a consumer). A working external provider (himalaya mail
+CLI) plus consumer (the four tools) live in `nexuslbs/workbench-plugins`
+(`plugins/email-himalaya`, `plugins/email-tools`).
+
 ## 5. How an external source is added
 
 The core config (JSON `workbench.config.json` or YAML `workbench.config.yml` /
