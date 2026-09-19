@@ -1,0 +1,50 @@
+# Deployment config for ONE deployment of the workbench image.
+#
+# This file IS a run-time input, NOT part of the image:
+#
+#   docker run --rm -p 12347:12347 \
+#     -e CONFIG_FILE=/etc/workbench/deployment.config.yml \
+#     -v "$PWD/deploy/ci:/etc/workbench" \
+#     ghcr.io/nexuslbs/workbench:latest
+#
+# The image is built and published WITHOUT it (`.dockerignore` excludes
+# `deploy/`, and no build stage COPYs it), so the image never changes when this
+# file changes: a deployment can add or remove plugins by editing its config
+# and reloading, with no rebuild (`docs/` + the settings / plugin-manager seams).
+#
+# The CI validation (`Validate created image (run-time config)` job in
+# .github/workflows/publish.yml) mounts this file into the ALREADY-CREATED image
+# and exercises exactly that: boot with this plugin set, then add a source and
+# disable a plugin live, then assert the image id did not change.
+#
+# Credentials (if a deployment needs them) are references BY NAME only, e.g.
+# `${cred:github-app}` or `${env:GITHUB_TOKEN}`; never a value.
+sources:
+  # The core plugins shipped INSIDE the image: an image is a core checkout, no
+  # plugin repository is vendored into it.
+  - kind: path
+    id: core
+    path: /workbench/plugins
+    external: false
+  # An EXTERNAL plugin repository, the production shape: the core clones it into
+  # WORKBENCH_CACHE_DIR (/var/cache/workbench, writable in the image) and scans
+  # the `plugins` subtree.
+  - kind: git
+    id: workbench-plugins
+    url: https://github.com/nexuslbs/workbench-plugins
+    ref: main
+    subdir: plugins
+
+plugins:
+  # Per-plugin config of THIS deployment. The core test plugin prints this
+  # message, which is how the CI proves the run-time config is honoured.
+  hello-world:
+    message: hello from the deployment config
+
+# The Web UI provider. Enabling it exposes the plugin-manager / settings HTTP
+# seams the live add/remove-plugin check drives; the port equals the status port,
+# so the UI and `/health` share ONE listener (the docker-compose contract).
+web:
+  enabled: true
+  host: 0.0.0.0
+  port: 12347

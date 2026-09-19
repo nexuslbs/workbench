@@ -314,3 +314,34 @@ being replaced, a missing git binary, and a `git` source without a url.
 ## License
 
 MIT.
+
+## Image & publishing (ghcr.io/nexuslbs/workbench)
+
+The repo builds its own container image from the root `Dockerfile`
+(`FROM node:22-bookworm-slim`, the core checkout, `npm ci --omit=dev`, `git` for
+`git` plugin sources, `serve` on `WORKBENCH_PORT`/12347 with `/health`):
+
+```sh
+docker build -t workbench:dev .
+docker run --rm -p 12347:12347 workbench:dev
+curl -fsS http://127.0.0.1:12347/health
+```
+
+The image is the **core** only: no plugin repository is vendored into it and no
+deployment config is baked into it. A deployment passes its own config at RUN
+time via `CONFIG_FILE` (a mount), so plugins can be added/removed by editing the
+config and reloading, without rebuilding the image.
+
+`.github/workflows/publish.yml` publishes to GHCR:
+
+| Event | Published tags |
+| --- | --- |
+| push to branch `stable` | `ghcr.io/nexuslbs/workbench:latest` (only `latest`) |
+| push of tag `vX.Y.Z` | `ghcr.io/nexuslbs/workbench:X.Y.Z` and `:latest` |
+
+The workflow builds the image once, validates that created image in a separate
+job (with the deployment config supplied at run time,
+`deploy/ci/deployment.config.yml`), and only then pushes the same image; auth is
+the workflow's own `GITHUB_TOKEN` with `packages: write`. `.dockerignore` keeps
+`deploy/`, `.github/` and `node_modules` out of the image. See
+[`deploy/README.md`](deploy/README.md) for the full deployment/publishing notes.

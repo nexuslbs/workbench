@@ -1,0 +1,14 @@
+# Keep the image free of everything that is not the core itself.
+#
+# A DEPLOYMENT config (and the CI that drives it) must never be baked in: the
+# config is a run-time input of the created image (`CONFIG_FILE` + a mount).
+deploy
+.github
+
+# Local build / runtime leftovers.
+node_modules
+.git
+.gitignore
+.workbench
+*.log
+*.tar.gz

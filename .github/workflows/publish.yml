@@ -1,0 +1,307 @@
+# Publish the workbench CORE image to GitHub Container Registry.
+#
+# TRIGGERS / TAG POLICY (the operator's spec):
+#   * push to branch `stable`  -> ghcr.io/nexuslbs/workbench:latest        (latest ONLY)
+#   * push of tag `vX.Y.Z`     -> ghcr.io/nexuslbs/workbench:X.Y.Z AND :latest
+#
+# The image is built ONCE (`build`) and afterwards only LOADED, never rebuilt
+# and never mutated: `test` validates the created image and `publish` pushes
+# that same image. The DEPLOYMENT CONFIG is a RUN-TIME input of the created
+# image (`CONFIG_FILE` + a mount, see deploy/README.md) - it is NOT a layer:
+# a deployment adds/removes plugins by editing its config and reloading, with
+# no rebuild, and the config never lands inside the image.
+#
+# Auth: GHCR only via the workflow's own GITHUB_TOKEN (`packages: write`).
+# No PAT, no app key, no secret is referenced or committed anywhere here.
+name: publish
+
+on:
+  push:
+    branches:
+      - stable
+    tags:
+      - 'v*'
+
+# `packages: write` publishes to ghcr.io; `contents: read` is all the checkout
+# needs (this workflow never writes back to the repository).
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Preferred artifact: the image name IS the repository path (no sub-path).
+  IMAGE: ghcr.io/nexuslbs/workbench
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Build the image ONCE. Nothing is pushed here.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+      image_id: ${{ steps.image.outputs.id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Core checks (typecheck + unit tests)
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm test
+
+      - name: Docker metadata (tag policy)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # Exactly the policy, nothing else - no sha tag, so a `stable` push
+          # can never publish a version tag by accident.
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/stable' }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Record the created image id
+        id: image
+        run: |
+          set -euo pipefail
+          FIRST_TAG="$(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+          echo "tag=$FIRST_TAG" >> "$GITHUB_OUTPUT"
+          echo "id=$(docker image inspect --format '{{.Id}}' "$FIRST_TAG")" >> "$GITHUB_OUTPUT"
+
+      - name: Save the created image
+        run: |
+          set -euo pipefail
+          docker save $(echo '${{ steps.meta.outputs.tags }}' | tr '\n' ' ') | gzip > /tmp/workbench-image.tar.gz
+
+      - name: Upload the image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-image
+          path: /tmp/workbench-image.tar.gz
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 2. Validate the CREATED image (separate job, separate runner).
+  #    The deployment config is supplied here as a RUN-TIME input.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Validate created image (run-time config)
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The EXTERNAL plugin repository: never vendored into the image, mounted
+      # read-only at run time so the live "add a plugin set" check has a real
+      # external plugin to load.
+      - name: Checkout the plugins repository (external source under test)
+        uses: actions/checkout@v4
+        with:
+          repository: nexuslbs/workbench-plugins
+          path: plugins-clone
+
+      - name: Download the created image
+        uses: actions/download-artifact@v4
+        with:
+          name: workbench-image
+          path: /tmp/image
+
+      - name: Load the created image
+        id: load
+        run: |
+          set -euo pipefail
+          gunzip -c /tmp/image/workbench-image.tar.gz | docker load
+          FIRST_TAG="$(echo '${{ needs.build.outputs.tags }}' | head -n1)"
+          echo "tag=$FIRST_TAG" >> "$GITHUB_OUTPUT"
+          echo "id_before=$(docker image inspect --format '{{.Id}}' "$FIRST_TAG")" >> "$GITHUB_OUTPUT"
+          docker image inspect --format '{{.Id}} {{.Created}} {{.RepoTags}}' "$FIRST_TAG"
+
+      - name: The deployment config is NOT inside the image
+        run: |
+          set -euo pipefail
+          IMG="${{ steps.load.outputs.tag }}"
+          if docker run --rm "$IMG" ls /workbench/deploy >/dev/null 2>&1; then
+            echo "::error::a deploy/ directory is baked into the image; the deployment config must be a run-time input"
+            exit 1
+          fi
+          echo "OK: no deploy/ (deployment config) inside the image"
+          if docker run --rm "$IMG" sh -c "grep -rl 'hello from the deployment config' /workbench" | grep -q .; then
+            echo "::error::the deployment config content is baked into the image"
+            exit 1
+          fi
+          echo "OK: the deployment config content is inside the image? NO"
+
+      - name: Run the created image with the deployment config (run-time input)
+        id: run
+        run: |
+          set -euo pipefail
+          IMG="${{ steps.load.outputs.tag }}"
+          DEPLOY="$RUNNER_TEMP/deploy"
+          mkdir -p "$DEPLOY"
+          cp deploy/ci/deployment.config.yml "$DEPLOY/deployment.config.yml"
+          docker run -d --name wb-test \
+            -p 12347:12347 \
+            -e CONFIG_FILE=/etc/workbench/deployment.config.yml \
+            -v "$DEPLOY:/etc/workbench" \
+            -v "$PWD/plugins-clone:/opt/workbench-plugins:ro" \
+            "$IMG"
+
+          echo "== wait for /health =="
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:12347/health > /tmp/health.json 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          cat /tmp/health.json
+          echo
+
+          echo "== CLI: plugins =="
+          docker exec wb-test node src/cli.ts plugins
+          echo "== CLI: commands =="
+          docker exec wb-test node src/cli.ts commands
+          echo "== the deployment config is honoured: core plugin message comes from the config =="
+          docker exec wb-test node src/cli.ts hello world
+          echo "== an EXTERNAL plugin from the git source (cloned by the core at boot) answers =="
+          docker exec wb-test node src/cli.ts hello otherworld
+
+      - name: Dynamic plugin set change (edit config + reload, NO rebuild)
+        run: |
+          set -euo pipefail
+          echo "== BEFORE: plugins =="
+          docker exec wb-test node src/cli.ts plugins
+
+          echo "== ADD a plugin set at run time: install examples/ of the plugins clone =="
+          curl -sS -X POST http://127.0.0.1:12347/api/plugin-manager/action \
+            -H 'content-type: application/json' \
+            -d '{"action":"install","source":{"kind":"path","id":"workbench-plugins-examples","path":"/opt/workbench-plugins/examples"}}' \
+            -o /tmp/install.json -w 'HTTP %{http_code}\n'
+          head -c 600 /tmp/install.json
+          echo
+
+          echo "== REMOVE a plugin at run time: disable hello-otherworld =="
+          curl -sS -X POST http://127.0.0.1:12347/api/plugin-manager/action \
+            -H 'content-type: application/json' \
+            -d '{"action":"disable","target":"hello-otherworld"}' \
+            -o /tmp/disable.json -w 'HTTP %{http_code}\n'
+          head -c 400 /tmp/disable.json
+          echo
+
+          echo "== AFTER: plugins =="
+          docker exec wb-test node src/cli.ts plugins
+          echo "== AFTER: commands =="
+          docker exec wb-test node src/cli.ts commands
+          echo "== the config file AS WRITTEN (run-time input, persisted by the live change) =="
+          cat "$RUNNER_TEMP/deploy/deployment.config.yml"
+
+      - name: The created image is UNCHANGED by the config and by the tests
+        run: |
+          set -euo pipefail
+          IMG="${{ steps.load.outputs.tag }}"
+          AFTER="$(docker image inspect --format '{{.Id}}' "$IMG")"
+          echo "id_before=${{ steps.load.outputs.id_before }}"
+          echo "id_after =$AFTER"
+          test "$AFTER" = "${{ steps.load.outputs.id_before }}"
+          echo "OK: identical image id (created once, never mutated; no docker commit anywhere)"
+          docker rm -f wb-test
+          docker image inspect --format '{{.Id}} {{.Created}}' "$IMG"
+          # Every container this job ran was ephemeral: nothing to commit.
+          docker ps -a --filter name=wb-test --format '{{.Names}} {{.Status}}'
+
+  # ---------------------------------------------------------------------------
+  # 3. Publish the SAME image, with the tags the policy prescribes.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish image to GHCR
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Fail if the tag policy was violated for this event
+        run: |
+          set -euo pipefail
+          TAGS="$(echo '${{ needs.build.outputs.tags }}')"
+          echo "ref=${{ github.ref }}"
+          echo "publish tags:"; echo "$TAGS"
+          if [ "${{ github.ref }}" = "refs/heads/stable" ]; then
+            if [ "$TAGS" != "${{ env.IMAGE }}:latest" ]; then
+              echo "::error::a stable push must publish :latest ONLY"
+              exit 1
+            fi
+            echo "OK: stable -> latest only"
+          fi
+          case "${{ github.ref }}" in
+            refs/tags/v*)
+              VERSION="${{ github.ref_name }}"; VERSION="${VERSION#v}"
+              echo "$TAGS" | grep -qx "${{ env.IMAGE }}:$VERSION" || { echo "::error::missing version tag $VERSION"; exit 1; }
+              echo "$TAGS" | grep -qx "${{ env.IMAGE }}:latest" || { echo "::error::missing :latest"; exit 1; }
+              echo "OK: tag push -> $VERSION + latest" ;;
+          esac
+
+      - name: Download the validated image
+        uses: actions/download-artifact@v4
+        with:
+          name: workbench-image
+          path: /tmp/image
+
+      - name: Load the SAME image the test job validated
+        run: |
+          set -euo pipefail
+          gunzip -c /tmp/image/workbench-image.tar.gz | docker load
+          for tag in $(echo '${{ needs.build.outputs.tags }}' | tr '\n' ' '); do
+            echo "loaded $(docker image inspect --format '{{.Id}}' "$tag") -> $tag"
+          done
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push (stable -> :latest, vX.Y.Z -> :X.Y.Z + :latest)
+        run: |
+          set -euo pipefail
+          for tag in $(echo '${{ needs.build.outputs.tags }}' | tr '\n' ' '); do
+            echo "== docker push $tag =="
+            docker push "$tag"
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "### workbench image published"
+            echo
+            echo "ref: \`${{ github.ref }}\`"
+            echo
+            echo "pushed tags:"
+            echo '```'
+            echo '${{ needs.build.outputs.tags }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
