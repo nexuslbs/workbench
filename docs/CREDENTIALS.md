@@ -352,8 +352,10 @@ PRECEDENCE RULE (binding): credential-free sources and plugin rows resolve first
 credential-dependent entries resolve as soon as a provider is registered in the
 same boot. A provider plugin MUST therefore be reachable from a source that needs
 no credential (a `path` source, the PUBLIC `git` source, or a private source whose
-OWN credential is already resolvable). `credentials.bootstrap` no longer exists:
-selection is `credentials.providers` alone (section 3).
+OWN credential is already resolvable). Selection is `credentials.providers`
+alone (section 3): there is NO `credentials.bootstrap` knob - no core code path
+reads such a key, and a legacy config that still carries one boots with the key
+IGNORED.
 The CREDENTIALS PHASE loads every plugin that declares the `credentials`
 capability, whether it is a PROVIDER (the declaration carries a
 `provider` id) or a GIT AUTH STRATEGY (no id, e.g. the
