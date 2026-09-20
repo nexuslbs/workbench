@@ -511,6 +511,39 @@ The image is the **core** only: no plugin repository is vendored into it and no
 deployment config is baked into it. A deployment passes its own config at RUN
 time via `CONFIG_FILE` (a mount), so plugins can be added/removed by editing the
 config and reloading, without rebuilding the image.
+### The browser is a SEPARATE image (the core image ships NO browser)
+
+The published core image is browser-free by design: no chromium and no playwright
+browser cache are baked into it. Driving a real browser is a DEPLOYMENT input,
+exactly like a plugin source: run ONE browser service from its OWN image and
+point the `browser-use-playwright` provider at it.
+
+```sh
+docker run -d --name workbench-browser \
+  -p 127.0.0.1:9222:9222 \
+  mcr.microsoft.com/playwright:v1.63.0-noble \
+  /bin/bash -lc 'exec /ms-playwright/chromium-*/chrome-linux*/chrome --headless --no-sandbox \
+    --remote-debugging-address=0.0.0.0 --remote-debugging-port=9222 about:blank'
+```
+
+```yaml
+browser-use-playwright:
+  browserService:
+    endpoint: http://127.0.0.1:9222
+    image: mcr.microsoft.com/playwright:v1.63.0-noble
+    generalService: { type: container, params: { container: workbench-browser } }
+    start: '<start chromium with --remote-debugging-port=9222>'
+```
+
+The browser image/service is reached through the `general-service@1` seam
+(`workbench-plugins`), so the TRANSPORT is config (container / ssh / shell /
+http) and the browser is never part of the workbench image. A bare `wsEndpoint`
+(the `cdpEndpoint` alias) attaches the same way. With nothing configured - and
+nothing answering - the provider answers the typed `browser-use.no-browser` /
+`browser-use.endpoint-unreachable` error naming the missing prerequisite; it
+never falls back to a local launch and never to an HTTP fetch pretending to be a
+browser. See `workbench-plugins/docs/SERVICES.md`, section "Browser-use
+capability".
 
 `.github/workflows/publish.yml` publishes to GHCR:
 
