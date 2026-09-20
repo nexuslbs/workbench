@@ -37,7 +37,7 @@ import {
   type SourceReport,
 } from './loader.ts'
 import { controlSocketPath } from './control.ts'
-import { resolveSource, sourceId, type SourceAuthOutcome } from './sources.ts'
+import { resolveSource, sourceId, dependencyState, readCheckoutCommit, sourceCheckout, type SourceAuthOutcome } from './sources.ts'
 import { driftedSourceGraphs } from './module-graph.ts'
 import {
   renderCapability,
@@ -48,11 +48,15 @@ import {
   type HostApi,
   type HostInventory,
   type HostReconcileReport,
+  type HostSourceRefreshReport,
   type LoadedPlugin,
   type MutationSurface,
   type PluginDiscoveryInfo,
   type PluginState,
   type ReconcileChange,
+  type SourceRefreshEntry,
+  type SourceRefreshOperation,
+  type SourceRefreshOptions,
   type SourceSpec,
   type WorkbenchConfig,
 } from './types.ts'
@@ -376,17 +380,35 @@ export class Host implements HostApi {
     return { ok, action, target, request, persisted: state.persisted, before, after: this.inventory(), message }
   }
 
-  /** Re-scans the configured sources so new/removed plugins become visible. */
-  private refresh(): void {
+  /**
+   * Re-scans the configured sources so new/removed plugins become visible.
+   *
+   * `only` limits the walk to those source IDS (a TARGETED refresh): the sources
+   * left out are neither fetched nor provisioned, and their previous reports are
+   * KEPT, so refreshing one source never disturbs the report of the others.
+   */
+  private refresh(only?: readonly string[]): void {
     const found = discoverPlugins({
       config: this.rawConfig(),
       configDir: this.options.configDir,
       cacheDir: this.options.cacheDir,
       includeExternal: this.options.includeExternal,
       sourceAuth: this.sourceAuth,
+      ...(only === undefined ? {} : { only }),
       log: this.options.log,
     })
-    this.sourceReports = found.sources
+    if (only === undefined) {
+      this.sourceReports = found.sources
+    } else {
+      // A TARGETED walk: the reports it produced REPLACE the matching entries (in
+      // their configured order) and every untouched source keeps its report.
+      const fresh = new Map(found.sources.map((report) => [report.id, report]))
+      const merged = this.sourceReports.map((report) => fresh.get(report.id) ?? report)
+      for (const report of found.sources) {
+        if (!merged.some((entry) => entry.id === report.id)) merged.push(report)
+      }
+      this.sourceReports = merged
+    }
     const seen = new Set<string>()
     for (const discovery of found.discoveries) {
       seen.add(discovery.name)
@@ -677,6 +699,196 @@ export class Host implements HostApi {
       this.syncRegistry()
       return `removed source '${id}' (unloaded ${unloaded.length} plugin(s): ${unloaded.join(', ') || 'none'})`
     })
+  }
+
+  // ------------------------------------------------------------ source refresh
+
+  /**
+   * `workbench sources update|list`: the FIRST-CLASS "update the remote plugin
+   * sources in place" operation.
+   *
+   * `update` re-resolves the SELECTED sources through the SAME
+   * `resolveSource`/`provisionDependencies` path the boot and `reconcile` use
+   * (never a second fetch implementation): the configured `url`/`ref` are fetched
+   * and force-checked-out DETACHED in place, the checkout's dependencies are
+   * provisioned through the package manager its lockfile names, and the plugins
+   * whose code moved UNDER the process are re-imported by the module-graph drift
+   * pass - with no restart.
+   *
+   * `list` is the READ-ONLY half: it resolves NOTHING (no fetch, no install) and
+   * reports the checkout directory, the resolved commit and the dependency state
+   * exactly as they are on disk.
+   *
+   * The config FILE is the truth and is NEVER written (`persisted: false`): the
+   * verb deliberately offers NO `ref` override, so a refresh can never leave the
+   * process in a state that contradicts the file on disk. A ref bump is applied
+   * by editing the config `ref` and calling this - which is also why a `path`
+   * source, and an unknown id, are refused by name instead of being guessed.
+   * Failures are per source: one broken source never stops the others.
+   */
+  async refreshSources(options: SourceRefreshOptions = {}): Promise<HostSourceRefreshReport> {
+    const operation: SourceRefreshOperation = options.operation ?? 'update'
+    const before = this.inventory()
+    const entries: SourceRefreshEntry[] = []
+    const changed: string[] = []
+    const errors: string[] = []
+    let reimported: string[] = []
+    let ok = true
+    let message: string
+    try {
+      // The config FILE is the truth, re-read exactly like the boot and
+      // `reconcile` read it: its `url`/`ref` are what gets fetched.
+      this.reloadConfig()
+      const specs = this.selectSources(options.ids)
+      const selected = specs.map((spec) => sourceId(spec, this.options.configDir))
+      // The PREVIOUS commit of every selected checkout, read BEFORE anything is
+      // fetched: that is what makes the report an honest `old -> new` statement
+      // instead of a claim.
+      const previous = new Map<string, string | null>()
+      for (const spec of specs) {
+        const id = sourceId(spec, this.options.configDir)
+        const checkout = sourceCheckout(spec, this.options.configDir, this.options.cacheDir)
+        previous.set(id, checkout === null ? null : readCheckoutCommit(checkout))
+      }
+      if (operation === 'update') {
+        // A TARGETED walk: only the selected sources are re-resolved, so a
+        // one-source refresh never fetches (or provisions) the others.
+        await this.refreshSourceAuths()
+        this.refresh(selected)
+        // The walk may have moved code UNDER this process (a new commit, a
+        // re-checkout of the same ref): the drift pass re-imports the plugins of
+        // the refreshed sources as a WHOLE module graph - entries AND helpers -
+        // which is what makes the NEW code answer without a restart.
+        reimported = await this.reimportDrifted(driftedSourceGraphs(), new Set(selected))
+        this.syncRegistry()
+      }
+      for (const spec of specs) {
+        const id = sourceId(spec, this.options.configDir)
+        const report = this.sourceReports.find((entry) => entry.id === id)
+        const checkout = sourceCheckout(spec, this.options.configDir, this.options.cacheDir)
+        const dir = report?.dir ?? checkout
+        const resolvedCommit = checkout === null ? null : (report?.commit ?? readCheckoutCommit(checkout))
+        const previousCommit = previous.get(id) ?? null
+        const sourceChanged = checkout !== null && previousCommit !== resolvedCommit
+        const plugins = [...this.entries.values()]
+          .filter((entry) => entry.discovery.source === id)
+          .map((entry) => entry.discovery.name)
+          .sort()
+        const moved = reimported.filter((name) => this.entries.get(name)?.discovery.source === id)
+        if (sourceChanged) changed.push(id)
+        if (report?.error !== undefined) errors.push(id)
+        entries.push({
+          id,
+          kind: spec.kind,
+          url: typeof spec.url === 'string' ? spec.url : null,
+          ref: typeof spec.ref === 'string' && spec.ref.trim().length > 0 ? spec.ref : null,
+          dir: dir ?? null,
+          previousCommit,
+          resolvedCommit,
+          changed: sourceChanged,
+          dependency: dir === null ? 'unknown' : dependencyState(checkout ?? dir),
+          ...(report?.dependencies === undefined ? {} : { dependencies: report.dependencies }),
+          plugins,
+          reimported: moved,
+          ...(report?.error === undefined ? {} : { error: report.error }),
+        })
+      }
+      // One broken source must never hide the others: the report names it, the
+      // sources that answered still did, and `ok` reflects the whole operation.
+      if (errors.length > 0) ok = false
+      message =
+        `${operation === 'update' ? 'updated' : 'listed'} ${entries.length} source(s) from ${this.options.configFile}: ` +
+        `${changed.length} changed, ${reimported.length} plugin(s) re-imported, ${errors.length} error(s); ` +
+        `no config write, no restart`
+    } catch (error) {
+      ok = false
+      message = `sources ${operation} failed: ${failureMessage(error)}`
+      this.options.log(`host: ${message}`)
+    }
+    return {
+      ok,
+      action: 'sources-update',
+      target: options.ids === undefined || options.ids.length === 0 ? '(all git sources)' : options.ids.join(', '),
+      request: { operation, ids: options.ids ?? [] },
+      persisted: false,
+      before,
+      after: this.inventory(),
+      message,
+      operation,
+      sources: entries,
+      changed,
+      errors,
+      reimported,
+    }
+  }
+
+  /**
+   * The sources a `sources` operation covers: every configured `kind: git`
+   * source, or EXACTLY the ids asked for. An unknown id, and a `path` source -
+   * which has nothing to fetch - are refused BY NAME: guessing what the operator
+   * meant is what leaves a process serving something the config does not say.
+   */
+  private selectSources(ids?: readonly string[]): SourceSpec[] {
+    const configured = this.rawConfig().sources
+    const git = configured.filter((spec) => spec.kind === 'git')
+    if (ids === undefined || ids.length === 0) {
+      if (git.length === 0) {
+        throw new Error("no 'git' source is configured: there is nothing to update ('workbench sources list' shows the configured sources)")
+      }
+      return git
+    }
+    const selected: SourceSpec[] = []
+    for (const id of ids) {
+      const spec = configured.find((candidate) => sourceId(candidate, this.options.configDir) === id)
+      if (spec === undefined) throw new Error(`no configured source with id '${id}' (see 'workbench sources list')`)
+      if (spec.kind !== 'git') {
+        throw new Error(`source '${id}' is a 'path' source: there is nothing to fetch (a path source IS the directory the config names)`)
+      }
+      selected.push(spec)
+    }
+    return selected
+  }
+
+  /**
+   * Re-imports the plugins whose loaded module graph no longer matches the code
+   * on disk - but ONLY the ones that came from the sources THIS operation
+   * refreshed. An in-place fetch + checkout invalidates the whole module graph of
+   * a source, so a plugin loaded from it must be imported again from the new
+   * graph; otherwise the process keeps serving the stale one (the live-swap
+   * defect) until a restart.
+   */
+  private async reimportDrifted(drift: ReadonlySet<string>, sources: ReadonlySet<string>): Promise<string[]> {
+    if (drift.size === 0) return []
+    const roots = [...drift]
+    const roster = this.rawConfig().plugins ?? {}
+    const reimported: string[] = []
+    for (const name of [...this.entries.keys()].sort()) {
+      const entry = this.entries.get(name)
+      if (entry === undefined || entry.state !== 'loaded') continue
+      if (!sources.has(entry.discovery.source)) continue
+      const dir = entry.discovery.dir
+      if (!roots.some((root) => dir === root || dir.startsWith(root + path.sep))) continue
+      try {
+        await this.disposeEntry(entry)
+        const config = await this.pluginConfigFor(name, roster[name] ?? {})
+        this.declareCapabilities(entry.discovery)
+        const { fiber } = await loadDiscovered(this.ctx, entry.discovery, config, this.options.log)
+        this.entries.set(name, { discovery: entry.discovery, state: 'loaded', fiber, config })
+        reimported.push(name)
+      } catch (error) {
+        const text = failureText(error)
+        const failed = this.entries.get(name)
+        if (failed !== undefined) {
+          failed.state = 'failed'
+          failed.error = text
+        }
+        this.options.log(`host: plugin '${name}' could not be re-imported after the source refresh: ${text}`)
+      }
+    }
+    if (reimported.length > 0) {
+      this.options.log(`host: re-imported ${reimported.length} plugin(s) from the refreshed source(s): ${reimported.join(', ')}`)
+    }
+    return reimported
   }
 
   // -------------------------------------------------------------- reconcile

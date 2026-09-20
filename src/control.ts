@@ -21,7 +21,7 @@ import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import type { HostInventory, HostReconcileReport } from './types.ts'
+import type { HostInventory, HostReconcileReport, HostSourceRefreshReport, SourceRefreshOptions } from './types.ts'
 
 /** Environment variable overriding the control-socket path (both sides read it). */
 export const CONTROL_SOCKET_ENV = 'WORKBENCH_CONTROL_SOCKET'
@@ -30,11 +30,15 @@ export const CONTROL_SOCKET_ENV = 'WORKBENCH_CONTROL_SOCKET'
 export const CONTROL_PROTOCOL_VERSION = 1
 
 /** The operations the channel answers. */
-export type ControlOp = 'ping' | 'inventory' | 'reconcile'
+export type ControlOp = 'ping' | 'inventory' | 'reconcile' | 'sources-update'
 
 /** One request line (newline delimited JSON). */
 export interface ControlRequest {
   op: ControlOp
+  /** `sources-update`: refresh ONLY these source ids (default: every plugin source). */
+  ids?: string[]
+  /** `sources-update`: only READ the source state - no fetch, no install, no re-import. */
+  list?: boolean
 }
 
 /** One response line: always `ok` plus the pid of the process that answered. */
@@ -48,6 +52,8 @@ export interface ControlResponse {
   plugins?: number
   inventory?: HostInventory
   report?: HostReconcileReport
+  /** Answer of the `sources-update` op. */
+  refresh?: HostSourceRefreshReport
   error?: string
 }
 
@@ -70,6 +76,13 @@ export interface ControlChannelOptions {
   configFile: string
   inventory: () => HostInventory
   reconcile: () => Promise<HostReconcileReport>
+  /**
+   * The SOURCE refresh of THIS process (`host.refreshSources()`): `update`
+   * fetches and force-checks-out the configured ref in place, `list` only READS
+   * the state. Omitted by a caller that does not expose the operation - the
+   * channel then REFUSES it by name instead of reporting a silent success.
+   */
+  refreshSources?: (options: SourceRefreshOptions) => Promise<HostSourceRefreshReport>
   log: (message: string) => void
 }
 
@@ -141,7 +154,23 @@ export async function startControlChannel(options: ControlChannelOptions): Promi
         const report = await serialise(() => options.reconcile())
         return answer(op, { report, plugins: report.loaded })
       }
-      return { ...answer(op), ok: false, error: `unknown op '${op}' (expected ping, inventory or reconcile)` }
+      if (op === 'sources-update') {
+        const refresh = options.refreshSources
+        if (refresh === undefined) {
+          return { ...answer(op), ok: false, error: 'this process does not expose the sources-update operation' }
+        }
+        // Serialised with the reconciles: a source refresh and a roster converge
+        // must never interleave two mutations of the same tree.
+        const request2 = request
+        const report = await serialise(() =>
+          refresh({
+            operation: request2.list === true ? 'list' : 'update',
+            ...(Array.isArray(request2.ids) && request2.ids.length > 0 ? { ids: request2.ids } : {}),
+          }),
+        )
+        return answer(op, { refresh: report, plugins: report.after.plugins.length })
+      }
+      return { ...answer(op), ok: false, error: `unknown op '${op}' (expected ping, inventory, reconcile or sources-update)` }
     } catch (error) {
       return { ...answer(op), ok: false, error: (error as Error).message }
     }
@@ -255,4 +284,28 @@ export async function reconcileViaControlChannel(socketPath: string, timeoutMs =
   const live = await pingControlChannel(socketPath, 1_000)
   if (live === undefined) return undefined
   return callControlChannel(socketPath, { op: 'reconcile' }, timeoutMs)
+}
+
+/**
+ * The SOURCE refresh driven OUT-OF-BAND against a RUNNING process:
+ * `undefined` when no live channel owns `socketPath` (the caller then falls back
+ * to its own one-shot refresh). The default timeout is generous on purpose: an
+ * `update` fetches a repository AND may provision its dependencies.
+ */
+export async function refreshSourcesViaControlChannel(
+  socketPath: string,
+  request: { ids?: readonly string[]; list?: boolean } = {},
+  timeoutMs = 600_000,
+): Promise<ControlResponse | undefined> {
+  const live = await pingControlChannel(socketPath, 1_000)
+  if (live === undefined) return undefined
+  return callControlChannel(
+    socketPath,
+    {
+      op: 'sources-update',
+      ...(request.ids === undefined || request.ids.length === 0 ? {} : { ids: [...request.ids] }),
+      ...(request.list === true ? { list: true } : {}),
+    },
+    timeoutMs,
+  )
 }

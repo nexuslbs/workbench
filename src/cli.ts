@@ -4,9 +4,9 @@ import { fileURLToPath } from 'node:url'
 import { DEFAULT_CONFIG_FILES, findDefaultConfigFile } from './config.ts'
 import { CREDENTIALS_CONTRACT, parseCredentialRef, refLabel } from './credentials/definition.ts'
 import { createKernel, type Kernel } from './kernel.ts'
-import { controlSocketPath, reconcileViaControlChannel, startControlChannel } from './control.ts'
+import { controlSocketPath, reconcileViaControlChannel, refreshSourcesViaControlChannel, startControlChannel } from './control.ts'
 import type { WebSeam } from './web-seam.ts'
-import type { HostReconcileReport, LoadedPlugin, PluginDiscoveryInfo } from './types.ts'
+import type { HostReconcileReport, HostSourceRefreshReport, LoadedPlugin, PluginDiscoveryInfo, SourceRefreshEntry, SourceRefreshOperation } from './types.ts'
 
 /**
  * The READ side of the `web@1` seam, declared structurally on purpose: the
@@ -57,6 +57,23 @@ Usage:
                                   running one); --json prints the full per-plugin
                                   report; exit 1 when a row failed, the others
                                   still converged
+  workbench sources list          list the configured plugin sources: id, kind,
+                                  url, ref, checkout dir, resolved commit and the
+                                  dependency state of the checkout. READS ONLY -
+                                  no fetch, no install, no import. --id limits it
+                                  to one source; --json prints the full report
+  workbench sources update [--id <source-id>]
+                                  UPDATE the plugin sources IN PLACE: for every
+                                  selected source fetch + forced detached
+                                  checkout of the ref the CONFIG declares,
+                                  provision the checkout's dependencies, then
+                                  RE-IMPORT the plugins whose code moved under
+                                  the process - with NO config edit and NO
+                                  restart. Like reconcile it reaches the RUNNING
+                                  process over the control socket; --local runs a
+                                  ONE-SHOT process instead. --id refreshes one
+                                  source only; exit 1 when a source failed (the
+                                  others still ran), 2 on a bad invocation
   workbench commands              list registered commands
   workbench tools                 list registered tools with their parameter schemas
                                   (a command of the TOOLS plugin - the core ships
@@ -88,6 +105,7 @@ Options:
   --web-port <n>   serve only: Web UI port when the config enables the UI;
                    set it to the status port (--port) to serve the UI AND
                    /health on ONE listener
+  --id <source-id> 'workbench sources': limit list/update to ONE source (repeatable)
   --no-external    skip external plugin sources
   --json           machine readable output
   --help           this text
@@ -117,6 +135,8 @@ interface Flags {
   host?: string
   /** `--web-port`: the Web UI port when `serve` starts it (the status port keeps `--port`). */
   webPort?: number
+  /** `--id`: `workbench sources`: the source ids to operate on (empty = every source). */
+  id?: string[]
   rest: string[]
 }
 
@@ -145,6 +165,11 @@ function parseArgs(argv: string[]): Flags {
       const webPort = Number(value)
       if (!value || !Number.isInteger(webPort) || webPort < 0 || webPort > 65535) throw new Error(`--web-port needs a port number (0-65535), got ${value ?? '(none)'}`)
       flags.webPort = webPort
+    }
+    else if (arg === '--id') {
+      const value = argv[++i]
+      if (!value) throw new Error('--id needs a source id')
+      ;(flags.id ??= []).push(value)
     }
     else if (arg === '--no-external') flags.includeExternal = false
     else if (arg === '--local') flags.local = true
@@ -411,6 +436,17 @@ async function withControlChannel(kernel: Kernel, body: () => Promise<void>): Pr
       kernel.refreshCoreRoutes()
       return report
     },
+    // The source refresh rides the SAME channel: a process that booted a
+    // MINIMAL roster (no management plugin, no HTTP route, no extra port) can
+    // still be told to update its plugin sources in place, exactly like it can
+    // be told to converge its roster.
+    refreshSources: async (options) => {
+      const report = await kernel.host.refreshSources(options)
+      // The refresh can re-import a plugin that owns this process's own routes
+      // (the `web@1` provider): re-attach them to the live seam.
+      kernel.refreshCoreRoutes()
+      return report
+    },
     // The channel's diagnostics are LOG lines like any other: they go through
     // the logger service of THIS process (rendered by whichever exporter plugin
     // is mounted), not straight to stdout. This is also the proof that the
@@ -448,6 +484,78 @@ function printReconcileReport(report: HostReconcileReport, json: boolean, header
     `  ok=${report.ok} loaded=${report.loaded} deferred=${report.deferred.length ? report.deferred.join(', ') : 'none'} ` +
       `errors=${report.errors.length ? report.errors.join(', ') : 'none'}\n`,
   )
+}
+
+/**
+ * Renders ONE `host.refreshSources()` report. The SAME rendering serves the
+ * refresh this process performed itself and the one a RUNNING process reported
+ * back over its control channel - a caller must not be able to tell them apart.
+ */
+function printSourceRefreshReport(report: HostSourceRefreshReport, json: boolean, header?: string): void {
+  if (header !== undefined) process.stdout.write(header + '\n')
+  if (json) {
+    process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+    return
+  }
+  process.stdout.write(report.message + '\n')
+  for (const source of report.sources) {
+    const move = source.changed
+      ? `${shortenCommit(source.previousCommit)} -> ${shortenCommit(source.resolvedCommit)} CHANGED`
+      : `unchanged at ${shortenCommit(source.resolvedCommit)}`
+    process.stdout.write(`  ${source.id} (${sourceOrigin(source)}): ${move}\n`)
+    process.stdout.write(`    dir: ${source.dir ?? '(unresolved)'}  deps: ${dependencyLine(source)}\n`)
+    if (source.plugins.length) process.stdout.write(`    plugins: ${source.plugins.join(', ')}\n`)
+    if (source.reimported.length) process.stdout.write(`    re-imported: ${source.reimported.join(', ')}\n`)
+    if (source.error !== undefined) process.stdout.write(`    error: ${source.error}\n`)
+  }
+  process.stdout.write(
+    `  ok=${report.ok} persisted=false operation=${report.operation} ` +
+      `changed=${report.changed.length ? report.changed.join(', ') : 'none'} ` +
+      `re-imported=${report.reimported.length ? report.reimported.join(', ') : 'none'} ` +
+      `errors=${report.errors.length ? report.errors.join(', ') : 'none'}\n`,
+  )
+}
+
+/** The coordinates of a source as one line: kind, url, configured ref. */
+function sourceOrigin(source: SourceRefreshEntry): string {
+  const parts = [source.kind]
+  if (source.url !== null) parts.push(source.url)
+  if (source.ref !== null) parts.push(`ref ${source.ref}`)
+  return parts.join(', ')
+}
+
+/**
+ * The dependency line of one source: the OUTCOME of this refresh when it ran
+ * (`provisioned` / `cached` / `skipped` / `failed`, with the exact command), else
+ * the state READ FROM DISK (`provisioned` / `stale` / `missing` / `none`).
+ */
+function dependencyLine(source: SourceRefreshEntry): string {
+  const dependency = source.dependencies
+  if (dependency === undefined) return source.dependency
+  const detail = dependency.error === undefined ? '' : `: ${dependency.error}`
+  return `${dependency.status} (${dependency.command})${detail}`
+}
+
+/** A commit as an operator reads it: the short form, never a truncated word. */
+function shortenCommit(commit: string | null): string {
+  if (commit === null || commit.length === 0) return '(none)'
+  return commit.slice(0, 12)
+}
+
+/**
+ * The `workbench sources` subcommand of `flags.rest`: `update` or `list`, plus
+ * the `--id` selection. A missing/unknown verb is a USAGE error (exit 2), never
+ * a silent `update` of every source.
+ */
+function parseSourcesRequest(flags: Flags): { operation: SourceRefreshOperation; ids?: string[] } {
+  const sub = flags.rest[1]
+  if (sub !== 'update' && sub !== 'list') {
+    throw new Error(
+      `sources: expected 'update' or 'list', got '${sub ?? '(none)'}' ` +
+        `(usage: workbench sources update|list [--id <source-id>] [--json] [--local])`,
+    )
+  }
+  return { operation: sub, ...(flags.id === undefined || flags.id.length === 0 ? {} : { ids: flags.id }) }
 }
 
 async function main(): Promise<void> {
@@ -493,6 +601,53 @@ async function main(): Promise<void> {
       `workbench: no live workbench process serves the control channel ${socket} for ${configFile}; ` +
         `converging a ONE-SHOT process instead - a running process, if any, is NOT changed\n`,
     )
+  }
+
+  // `sources` is the EXPLICIT source refresh: the SAME out-of-band reachability
+  // as `reconcile` - the control socket of the process that owns THIS config, no
+  // plugin, no HTTP route, no extra port - but it refreshes the SOURCE CHECKOUTS
+  // instead of the roster: fetch + forced detached checkout of the ref the
+  // CONFIG declares, dependency provisioning of the checkout, and the re-import
+  // of the plugins whose code moved, all IN PLACE. Nothing is persisted (the
+  // config file is the input and stays the source of truth) and a running
+  // process is never restarted; `--local` skips the running process entirely.
+  if (head === 'sources') {
+    let request: { operation: SourceRefreshOperation; ids?: string[] }
+    try {
+      request = parseSourcesRequest(flags)
+    } catch (error) {
+      process.stderr.write(`workbench: ${(error as Error).message}\n`)
+      process.exitCode = 2
+      return
+    }
+    if (!flags.local) {
+      const configFile = resolveConfigFile(flags)
+      const socket = controlSocketPath(configFile)
+      const answer = await refreshSourcesViaControlChannel(socket, {
+        ...(request.ids === undefined ? {} : { ids: request.ids }),
+        list: request.operation === 'list',
+      })
+      if (answer?.refresh !== undefined) {
+        printSourceRefreshReport(
+          answer.refresh,
+          flags.json,
+          `workbench: the RUNNING process (pid ${answer.pid}) refreshed the plugin sources out-of-band via ${socket}`,
+        )
+        process.exitCode = answer.refresh.ok ? 0 : 1
+        return
+      }
+      if (answer !== undefined) {
+        process.stderr.write(
+          `workbench: the control channel ${socket} (pid ${answer.pid}) did not refresh the sources: ${answer.error ?? 'unknown error'}\n`,
+        )
+        process.exitCode = 1
+        return
+      }
+      process.stderr.write(
+        `workbench: no live workbench process serves the control channel ${socket} for ${configFile}; ` +
+          `refreshing the sources with a ONE-SHOT process instead - a running process, if any, is NOT changed\n`,
+      )
+    }
   }
 
   if (head === 'serve') {
@@ -545,6 +700,16 @@ async function main(): Promise<void> {
       printReconcileReport(report, flags.json)
       // A row that failed leaves the process running: the exit code is what tells
       // a script that the roster did NOT fully converge.
+      process.exitCode = report.ok ? 0 : 1
+      return
+    }
+
+    if (head === 'sources') {
+      // No live channel answered (or `--local` was given): refresh THIS one-shot
+      // process with the SAME operation the running process uses. `list` only
+      // reads the state, so a one-shot `list` never touches a checkout.
+      const report = await kernel.host.refreshSources(parseSourcesRequest(flags))
+      printSourceRefreshReport(report, flags.json)
       process.exitCode = report.ok ? 0 : 1
       return
     }

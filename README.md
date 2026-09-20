@@ -215,6 +215,78 @@ resolve re-checks out and re-provisions) and can race a fetch. Nothing must be
 copied into a checkout by hand, and `node_modules` must never be committed to a
 plugin repository.
 
+### `workbench sources update|list`: refreshing the sources ON PURPOSE
+
+The two operations above are how a *config change* reaches a running process.
+This one is the explicit entry point for "the sources moved, pull them": it
+refreshes the SOURCE CHECKOUTS themselves, with no config edit and no restart.
+
+```console
+$ docker exec <container> node dist/cli.js sources list
+workbench: listed 3 source(s) from /opt/workbench/workbench.config.yml: 0 changed, 0 plugin(s) re-imported, 0 error(s); no config write, no restart
+  core (path, external: false): unchanged at (none)
+    dir: /opt/workbench/plugins  deps: none
+    plugins: hello-world, ...
+  plugins (git, https://github.com/nexuslbs/workbench-plugins, ref v0.0.8): unchanged at 4f0a9c1ab77e
+    dir: /var/lib/workbench/sources/plugins/plugins  deps: provisioned
+    plugins: plugin-manager, web-impl, ...
+  ok=true persisted=false operation=list changed=none re-imported=none errors=none
+
+$ docker exec <container> node dist/cli.js sources update
+workbench: the RUNNING process (pid 1) refreshed the plugin sources out-of-band via /tmp/workbench-control-3f1c0a9b77d2.sock
+workbench: updated 3 source(s) from /opt/workbench/workbench.config.yml: 1 changed, 2 plugin(s) re-imported, 0 error(s); no config write, no restart
+  plugins (git, https://github.com/nexuslbs/workbench-plugins, ref v0.0.8): 4f0a9c1ab77e -> 9d21e0f4c8a1 CHANGED
+    dir: /var/lib/workbench/sources/plugins/plugins  deps: cached (npm ci --omit=dev)
+    plugins: plugin-manager, web-impl, ...
+    re-imported: web-impl, plugin-manager
+  ok=true persisted=false operation=update changed=plugins re-imported=web-impl, plugin-manager errors=none
+```
+
+- **`update`** (the default selection is every `kind: git` source; `--id
+  <source-id>` limits it to one, repeatable): fetch + `checkout --force --detach`
+  of the ref the CONFIG declares, in the same checkout directory, through the
+  SAME `resolveSource` path the boot and `reconcile` use - never a second fetch
+  implementation. It then provisions the checkout's dependencies (the command its
+  lockfile names, exactly as described above) and re-imports the plugins whose
+  code moved under the process through the loader's module-graph drift pass, so
+  the NEW code answers with no restart.
+- **`list`** reads only: no fetch, no install, no import. It reports the checkout
+  directory, the resolved commit (`git rev-parse HEAD`) and the dependency state
+  read from disk (`provisioned` / `stale` / `missing` / `none`).
+- **The config file is the truth.** There is deliberately NO `--ref` (or any
+  other source-coordinate) override: a refresh can only fetch the `url`/`ref` the
+  config declares, so it can never leave the process serving something the file
+  on disk does not say. To move a source, edit the config `ref` (or push a new
+  commit on the configured branch ref) and run `sources update`.
+- **Nothing is persisted**: unlike `install` / `uninstall`, this operation never
+  writes the config file (`persisted: false`, and the file is byte-identical
+  afterwards). `--local` converges a ONE-SHOT process instead of the running one;
+  with no live process the command falls back to that one-shot and SAYS so.
+- **Reachability**: like `reconcile`, the default reaches the running process
+  through the core's control socket, so it works on a MINIMAL roster (no
+  management plugin, no HTTP route, no extra port). The op is `sources-update`
+  next to `ping` / `inventory` / `reconcile`. `--json` prints the full report;
+  the exit code is `1` when a source failed (the others still ran) and `2` on a
+  bad invocation (a missing/unknown subcommand is never a silent `update`).
+- **Relationship to `reconcile`**: `host.reconcile()` - and therefore the
+  `config-watch` plugin and the `plugin-manager` action - ALREADY re-resolves
+  every configured source as part of a roster converge, which is why a source
+  `ref` bump is applied by `reconcile` too. `sources update` is the EXPLICIT,
+  roster-independent entry point for the same refresh: it reports per source
+  `ref` -> commit moves, provisions the checkout, and refreshes even when
+  nothing in `plugins:` changed. Use it when you want the source pull to be the
+  operation, not a side effect of a converge.
+- **What it does NOT do**: no restart, no container lifecycle, no config write,
+  no `plugins:` roster change, no dependency install outside the source
+  checkout. A `path` source and an unknown `--id` are refused BY NAME (a path
+  source IS the directory the config names; there is nothing to fetch), and a
+  failing source is a typed diagnostic naming id + url + ref + git's stderr while
+  the other sources still refresh.
+
+When to run it: a `ref` bump, a new commit on a branch ref such as `main`, a
+wiped cache volume (it re-clones), or a checkout whose `node_modules` is missing
+or stale.
+
 ### Why the CORE serves that channel
 
 The in-process mutation surface of a deployment **is itself plugins**

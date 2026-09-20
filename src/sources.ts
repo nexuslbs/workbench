@@ -43,26 +43,14 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { packageRootOf, registerSourceGraph } from './module-graph.ts'
-import type { SourceSpec } from './types.ts'
+import type { DependencyProvisionReport, SourceDependencyState, SourceSpec } from './types.ts'
 
 /**
- * What happened to a checkout's DEPENDENCIES during source resolution. Reported
- * on the resolved source (and on the source report the loader/host render), so
- * "are the dependencies of this source installed?" is answerable without
- * reading the operator's shell history.
+ * The dependency-provision report is DECLARED in `types.ts` (the bottom of the
+ * module graph) and re-exported here, because this module is its producer:
+ * consumers (`src/loader.ts`) keep importing it from the module that PRODUCES it.
  */
-export interface DependencyProvisionReport {
-  /** Package manager the checkout declares (`npm` / `pnpm` / `yarn`). */
-  manager: string
-  /** The exact command that was run (and that an operator can run by hand). */
-  command: string
-  /** Directory the command runs in (the checkout root). */
-  dir: string
-  /** `provisioned` = installed now, `cached` = inputs unchanged, `skipped` = disabled, `failed` = install failed. */
-  status: 'provisioned' | 'cached' | 'skipped' | 'failed'
-  /** Set when the install failed or was disabled: the typed diagnostic, naming the command. */
-  error?: string
-}
+export type { DependencyProvisionReport } from './types.ts'
 
 /** A source spec resolved to the directory that holds the plugin directories. */
 export interface ResolvedSource {
@@ -73,6 +61,8 @@ export interface ResolvedSource {
   /** Set when the source could not be resolved (missing path, git failure, ...). */
   error?: string
   external: boolean
+  /** Git sources only: the resolved commit of the checkout (`git rev-parse HEAD`). */
+  commit?: string | null
   /** Git sources only: the dependency provisioning outcome (absent when the source declares no package.json). */
   dependencies?: DependencyProvisionReport
 }
@@ -386,6 +376,41 @@ function checkoutCommit(checkout: string): string | null {
   return result.ok && result.stdout.length > 0 ? result.stdout : null
 }
 
+/**
+ * The resolved commit of a checkout, READ-ONLY: `null` when there is no
+ * checkout (yet) or git cannot tell. Exported because the `sources` operation
+ * reports the commit a refresh moved FROM without resolving anything itself.
+ */
+export function readCheckoutCommit(checkout: string): string | null {
+  return checkoutCommit(checkout)
+}
+
+/**
+ * The CHECKOUT directory a source owns: `null` for `path` sources (nothing is
+ * fetched, the directory IS the source). Exported so `workbench sources list`
+ * can name the checkout of a source WITHOUT resolving it - resolution FETCHES,
+ * and a listing must never touch the network.
+ */
+export function sourceCheckout(spec: SourceSpec, configDir: string, cacheRoot: string): string | null {
+  if (spec.kind !== 'git') return null
+  return path.join(cacheRoot, sourceId(spec, configDir))
+}
+
+/**
+ * The DEPENDENCY state of a checkout, READ FROM DISK: no install is attempted,
+ * which is exactly what the `sources list` half reports. `none` = the checkout
+ * declares no `package.json`, `unknown` = the directory is not there.
+ */
+export function dependencyState(checkout: string): SourceDependencyState {
+  if (!fs.existsSync(checkout)) return 'unknown'
+  const plan = installPlan(checkout)
+  if (plan === null) return 'none'
+  if (!fs.existsSync(path.join(checkout, 'node_modules'))) return 'missing'
+  const previous = readDependencyMarker(dependencyMarker(checkout))
+  if (previous?.manager === plan.manager && previous?.inputs === dependencyInputs(checkout)) return 'provisioned'
+  return 'stale'
+}
+
 /** Resolves a source spec to a directory. Never throws: resolution errors are reported. */
 export function resolveSource(
   spec: SourceSpec,
@@ -430,7 +455,8 @@ export function resolveSource(
   // graph of this source, so a ref bump (or any in-place re-checkout) makes the
   // loader import the NEW code as a whole - entries AND helpers - instead of
   // meeting a helper cached from the previous checkout.
-  registerSourceGraph(checkout, { commit: checkoutCommit(checkout) })
+  const commit = checkoutCommit(checkout)
+  registerSourceGraph(checkout, { commit })
   const dependencies = provisionDependencies(id, spec, checkout, spec.ref)
   const dir = spec.subdir ? path.join(checkout, spec.subdir) : checkout
   if (!fs.existsSync(dir)) {
@@ -438,9 +464,12 @@ export function resolveSource(
       id,
       kind: 'git',
       dir: null,
+      commit,
       error: `${label(id, spec, spec.ref)}: git source subdir does not exist: ${dir} (checkout ${checkout})`,
       external,
     }
   }
-  return dependencies === undefined ? { id, kind: 'git', dir, external } : { id, kind: 'git', dir, external, dependencies }
+  return dependencies === undefined
+    ? { id, kind: 'git', dir, external, commit }
+    : { id, kind: 'git', dir, external, commit, dependencies }
 }

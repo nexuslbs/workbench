@@ -188,6 +188,35 @@ export interface LoadFailure {
   error: string
 }
 
+/**
+ * What happened to a checkout's DEPENDENCIES during source resolution. Reported
+ * on the resolved source (and on the source report the loader/host render), so
+ * "are the dependencies of this source installed?" is answerable without
+ * reading the operator's shell history.
+ *
+ * It is declared HERE (the bottom of the module graph) and re-exported by
+ * `src/sources.ts`, which PRODUCES it.
+ */
+export interface DependencyProvisionReport {
+  /** Package manager the checkout declares (`npm` / `pnpm` / `yarn`). */
+  manager: string
+  /** The exact command that was run (and that an operator can run by hand). */
+  command: string
+  /** Directory the command runs in (the checkout root). */
+  dir: string
+  /** `provisioned` = installed now, `cached` = inputs unchanged, `skipped` = disabled, `failed` = install failed. */
+  status: 'provisioned' | 'cached' | 'skipped' | 'failed'
+  /** Set when the install failed or was disabled: the typed diagnostic, naming the command. */
+  error?: string
+}
+
+/**
+ * The dependency state of a checkout READ FROM DISK, with NO install attempted:
+ * what `workbench sources list` reports (it must never touch the network).
+ * `none` = the checkout declares no `package.json`, `unknown` = no directory.
+ */
+export type SourceDependencyState = 'provisioned' | 'stale' | 'missing' | 'none' | 'unknown'
+
 /** A configured plugin source, as resolved and reported by the loader. */
 export interface SourceReport {
   id: string
@@ -195,7 +224,11 @@ export interface SourceReport {
   dir: string | null
   external: boolean
   plugins: number
+  /** Resolved commit of the checkout (`git rev-parse HEAD`); git sources only. */
+  commit?: string | null
   error?: string
+  /** What resolution did to the checkout's dependencies (git sources that declare a `package.json`). */
+  dependencies?: DependencyProvisionReport
 }
 
 /**
@@ -291,6 +324,69 @@ export interface HostInventory {
   commands: CommandInfo[]
 }
 
+/** What a `sources` operation is allowed to do. */
+export type SourceRefreshOperation = 'update' | 'list'
+
+/** One source of a `workbench sources update|list` report. */
+export interface SourceRefreshEntry {
+  id: string
+  kind: string
+  /** Repository url (git sources; null for `path` sources). */
+  url: string | null
+  /** The ref the CONFIG declares (git sources; null when it declares none). */
+  ref: string | null
+  /** Plugin directory of the source (the resolved checkout + `subdir`). */
+  dir: string | null
+  /** Resolved commit BEFORE the refresh (null when there was no checkout yet). */
+  previousCommit: string | null
+  /** Resolved commit AFTER the refresh (git sources). */
+  resolvedCommit: string | null
+  /** True when `previousCommit` differs from `resolvedCommit`. */
+  changed: boolean
+  /** Dependency state of the checkout as READ FROM DISK (never an install attempt). */
+  dependency: SourceDependencyState
+  /** Dependency outcome of THIS refresh (git sources that declare a `package.json`). */
+  dependencies?: DependencyProvisionReport
+  /** Plugins discovered in this source (loaded or available). */
+  plugins: string[]
+  /** Plugins RE-IMPORTED because the code under the process moved (module-graph drift). */
+  reimported: string[]
+  /** The typed diagnostic when the source could not be refreshed. */
+  error?: string
+}
+
+/** The request of {@link HostApi.refreshSources}. */
+export interface SourceRefreshOptions {
+  /** Refresh ONLY these source ids (default: every configured `kind: git` source). */
+  ids?: readonly string[]
+  /** `update` fetches and checks out (default); `list` only READS the current state. */
+  operation?: SourceRefreshOperation
+}
+
+/**
+ * What `workbench sources update|list` did, per source.
+ *
+ * The operation is NOT a config edit: the config file is the INPUT (the `url`
+ * and `ref` it declares are the source of truth) and it is never written, so
+ * `persisted` is always false. An `update` fetches and force-checks-out the
+ * configured ref in place, provisions the checkout's dependencies, and lets the
+ * module-graph drift pass RE-IMPORT the plugins that came from a checkout whose
+ * code moved - with no restart and no config write.
+ */
+export interface HostSourceRefreshReport extends HostActionResult {
+  action: 'sources-update'
+  /** `update` fetched and checked out; `list` only read the state. */
+  operation: SourceRefreshOperation
+  /** One entry per configured (or `--id`-selected) source. */
+  sources: SourceRefreshEntry[]
+  /** Ids whose resolved commit moved. */
+  changed: string[]
+  /** Ids this operation could not refresh (the others still ran). */
+  errors: string[]
+  /** Plugins re-imported because the code under the process moved. */
+  reimported: string[]
+}
+
 /** The actions the host (loader) API exposes. */
 export type HostAction =
   | 'load'
@@ -302,6 +398,7 @@ export type HostAction =
   | 'install-source'
   | 'remove-source'
   | 'reconcile'
+  | 'sources-update'
 
 /** What a host action did, with the before/after inventory (the refresh). */
 export interface HostActionResult {
@@ -390,6 +487,13 @@ export interface HostApi {
    * delta (load / unload / reload), leaving every converged plugin untouched.
    */
   reconcile(): Promise<HostReconcileReport>
+  /**
+   * Updates the configured plugin SOURCES in place: fetch + forced detached
+   * checkout of the ref the CONFIG declares, dependency provisioning of the
+   * checkout, then RE-IMPORT of the plugins whose code moved under the process.
+   * No config write, no restart. `operation: 'list'` only READS the state.
+   */
+  refreshSources(options?: SourceRefreshOptions): Promise<HostSourceRefreshReport>
 }
 
 /** One edit of a config file (see {@link ConfigPatch} and the config seam). */

@@ -27,6 +27,8 @@ export interface SourceReport {
   dir: string | null
   external: boolean
   plugins: number
+  /** Resolved commit of the checkout (`git rev-parse HEAD`); git sources only. */
+  commit?: string | null
   error?: string
   /**
    * What happened to the source's DEPENDENCIES (git sources that declare a
@@ -77,6 +79,12 @@ export interface LoadOptions {
   declare?: (discovery: PluginDiscovery) => void
   /** Loads only the discovered plugins this predicate accepts (two-phase loading). */
   filter?: (discovery: PluginDiscovery) => boolean
+  /**
+   * Resolve ONLY these source IDS (a TARGETED walk): every other source is
+   * skipped BEFORE `resolveSource`, so it is neither fetched nor provisioned and
+   * produces no report entry - the caller keeps its previous report for it.
+   */
+  only?: readonly string[]
   /**
    * Source AUTH resolved BEFORE the walk, keyed by source id: a `git` source that
    * declares `auth` cannot be fetched without it (the caller resolves it through
@@ -255,18 +263,25 @@ export function discoverPlugins(options: LoadOptions): DiscoverReport {
   for (const spec of options.config.sources) {
     const external = spec.external !== false
     if (external && !options.includeExternal) continue
+    // A TARGETED walk (`only`): only the ids the caller asked for are
+    // re-resolved, so one source can be refreshed without fetching, checking out
+    // or provisioning the others.
+    const specId = sourceId(spec, options.configDir)
+    if (options.only !== undefined && !options.only.includes(specId)) continue
 
     // A source that declares `auth` is fetched with the auth the CALLER resolved
     // through the LIVE credentials service, keyed by source id (the same key
     // `resolveSourceAuths` produces). A missing entry is NOT an anonymous retry:
     // `resolveSource` reports the source loudly and the walk skips it.
-    const source: ResolvedSource = resolveSource(
-      spec,
-      options.configDir,
-      options.cacheDir,
-      options.sourceAuth?.get(sourceId(spec, options.configDir)),
-    )
-    const sourceReport: SourceReport = { id: source.id, kind: source.kind, dir: source.dir, external, plugins: 0 }
+    const source: ResolvedSource = resolveSource(spec, options.configDir, options.cacheDir, options.sourceAuth?.get(specId))
+    const sourceReport: SourceReport = {
+      id: source.id,
+      kind: source.kind,
+      dir: source.dir,
+      external,
+      plugins: 0,
+      ...(source.commit === undefined ? {} : { commit: source.commit }),
+    }
     if (source.error || !source.dir) {
       sourceReport.error = source.error ?? 'source has no directory'
       options.log(`source '${source.id}' skipped: ${sourceReport.error}`)
