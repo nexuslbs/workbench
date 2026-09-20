@@ -556,7 +556,7 @@ export interface WebConfig {
   enabled?: boolean
   /** Bind host (default 127.0.0.1 - the UI has no auth in this round). */
   host?: string
-  /** Bind port (default 12348; `0` picks a free port). */
+  /** Bind port (default 8080; `0` picks a free port). */
   port?: number
 }
 

@@ -29,7 +29,7 @@ const CORE_DIR = path.resolve(HERE, '..')
  * into the environment (`WORKBENCH_PORT` / `WORKBENCH_WEB_PORT`) and the provider
  * plugin binds it; with no provider plugin loaded, nothing listens at all.
  */
-export const WEB_PROVIDER_DEFAULT_PORT = 12348
+export const WEB_PROVIDER_DEFAULT_PORT = 8080
 
 /** Interval of the `serve` heartbeat log line. */
 const HEARTBEAT_MS = 60_000

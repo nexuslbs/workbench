@@ -12,11 +12,11 @@
 #   docker build -t ghcr.io/nexuslbs/workbench:dev .
 #
 # Run (deployment config mounted read-only, port published):
-#   docker run --rm -p 12347:12347 \
+#   docker run --rm -p 8080:8080 \
 #     -e CONFIG_FILE=/etc/workbench/workbench.config.yml \
 #     -v "$PWD/my-deployment.config.yml:/etc/workbench/workbench.config.yml:ro" \
 #     ghcr.io/nexuslbs/workbench:dev
-#   curl -fsS http://127.0.0.1:12347/health
+#   curl -fsS http://127.0.0.1:8080/health
 
 # Official Node.js image. 22.x satisfies `engines.node >= 22.18` from
 # package.json; the core strips TypeScript at run time (no build step) and the
@@ -82,8 +82,8 @@ ENV WORKBENCH_CACHE_DIR=/var/cache/workbench
 # Status endpoint of `serve` (`/health`). CONFIG_FILE is read at START:
 # unset/empty = the config shipped inside the image, non-empty = that file
 # (typically a mount) - the deployment config seam.
-ENV WORKBENCH_PORT=12347
-EXPOSE 12347
+ENV WORKBENCH_PORT=8080
+EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -fsS "http://127.0.0.1:${WORKBENCH_PORT}/health" || exit 1

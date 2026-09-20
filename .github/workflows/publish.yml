@@ -169,7 +169,7 @@ jobs:
           mkdir -p "$DEPLOY"
           cp deploy/ci/deployment.config.yml "$DEPLOY/deployment.config.yml"
           docker run -d --name wb-test \
-            -p 12347:12347 \
+            -p 8080:8080 \
             -e CONFIG_FILE=/etc/workbench/deployment.config.yml \
             -v "$DEPLOY:/etc/workbench" \
             -v "$PWD/plugins-clone:/opt/workbench-plugins:ro" \
@@ -177,7 +177,7 @@ jobs:
 
           echo "== wait for /health =="
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:12347/health > /tmp/health.json 2>/dev/null; then
+            if curl -fsS http://127.0.0.1:8080/health > /tmp/health.json 2>/dev/null; then
               break
             fi
             sleep 2
@@ -211,7 +211,7 @@ jobs:
           docker exec wb-test node src/cli.ts plugins
 
           echo "== ADD a plugin set at run time: install examples/ of the plugins clone =="
-          curl -sS -X POST http://127.0.0.1:12347/api/plugin-manager/action \
+          curl -sS -X POST http://127.0.0.1:8080/api/plugin-manager/action \
             -H 'content-type: application/json' \
             -d '{"action":"install","source":{"kind":"path","id":"workbench-plugins-examples","path":"/opt/workbench-plugins/examples"}}' \
             -o /tmp/install.json -w 'HTTP %{http_code}\n'
@@ -219,7 +219,7 @@ jobs:
           echo
 
           echo "== REMOVE a plugin at run time: disable hello-otherworld =="
-          curl -sS -X POST http://127.0.0.1:12347/api/plugin-manager/action \
+          curl -sS -X POST http://127.0.0.1:8080/api/plugin-manager/action \
             -H 'content-type: application/json' \
             -d '{"action":"disable","target":"hello-otherworld"}' \
             -o /tmp/disable.json -w 'HTTP %{http_code}\n'

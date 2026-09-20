@@ -9,8 +9,8 @@ nothing here is a product feature, and nothing here is baked into the image.
 
 ```sh
 docker build -t workbench:dev .          # FROM node:22-bookworm-slim + this repo
-docker run --rm -p 12347:12347 workbench:dev
-curl -fsS http://127.0.0.1:12347/health   # -> {"status":"ok",...}
+docker run --rm -p 8080:8080 workbench:dev
+curl -fsS http://127.0.0.1:8080/health   # -> {"status":"ok",...}
 ```
 
 - `FROM` the **official** Node.js image (`node:22-bookworm-slim`; 22.x satisfies
@@ -20,7 +20,7 @@ curl -fsS http://127.0.0.1:12347/health   # -> {"status":"ok",...}
   cloned; `WORKBENCH_CACHE_DIR=/var/cache/workbench` is a writable checkout dir.
 - The default command is `node src/cli.ts serve`: it boots the configured
   plugins, serves `/health` (and, when the config rosters the web PROVIDER PLUGIN from the
-  external source, the Web UI too) on `WORKBENCH_PORT` (default `12347`), and
+  external source, the Web UI too) on `WORKBENCH_PORT` (default `8080`), and
   stays up. The web server itself is a PLUGIN (`web-impl`): with
   `web.enabled: true` and no provider plugin the core reports `web: deferred`
   and answers `/health` on the port itself.
@@ -46,7 +46,7 @@ A deployment declares its plugin sources and its per-plugin config in **its own
 config file**, supplied when the image is RUN - never during the build:
 
 ```sh
-docker run --rm -p 12347:12347 \
+docker run --rm -p 8080:8080 \
   -e CONFIG_FILE=/etc/workbench/deployment.config.yml \
   -v "$PWD/my-deploy:/etc/workbench:ro" \
   ghcr.io/nexuslbs/workbench:latest

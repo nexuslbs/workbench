@@ -312,15 +312,15 @@ server.
 web:
   enabled: true      # a REQUEST: only a web@1 provider plugin can serve it
   host: 127.0.0.1    # loopback by default: the UI has no auth in this round
-  port: 12348
+  port: 8080
 ```
 
 Port resolution of the listener the PROVIDER binds (the plugin's own row wins):
 `plugins.<provider>.port`, then `$WORKBENCH_WEB_PORT`, then `$WORKBENCH_PORT`
 (the port a deployment publishes, which `serve` exports from `--port` /
-`--web-port`), then the definition default `12348`. That order is what lets ONE
+`--web-port`), then the definition default `8080`. That order is what lets ONE
 published port carry the UI and the `/health` the compose healthcheck probes:
-publish 12347, roster the provider with `port: 12347`, and the provider answers
+publish 8080, roster the provider with `port: 8080`, and the provider answers
 both while the core binds nothing.
 
 A UI plugin is an ordinary plugin: a directory in any configured source with a
@@ -454,7 +454,7 @@ export function apply(ctx, config = {}) {
 ```
 
 ```console
-$ curl -s -X POST http://127.0.0.1:12348/api/tools/hello%20greet -d '{"name":"Ada","times":2}'
+$ curl -s -X POST http://127.0.0.1:8080/api/tools/hello%20greet -d '{"name":"Ada","times":2}'
 {"status":"ok","tool":"hello greet","result":{"message":"Hello, Ada! Hello, Ada!"}}
 ```
 

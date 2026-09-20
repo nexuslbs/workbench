@@ -2,7 +2,7 @@
 #
 # This file IS a run-time input, NOT part of the image:
 #
-#   docker run --rm -p 12347:12347 \
+#   docker run --rm -p 8080:8080 \
 #     -e CONFIG_FILE=/etc/workbench/deployment.config.yml \
 #     -v "$PWD/deploy/ci:/etc/workbench" \
 #     ghcr.io/nexuslbs/workbench:latest
@@ -69,7 +69,7 @@ plugins:
   # is also what makes the plugin-manager / settings HTTP seams answer.
   web-impl:
     host: 0.0.0.0
-    port: 12347
+    port: 8080
 
 # The Web UI section: a REQUEST, SERVED by a provider plugin (`web-impl`,
 # rostered above from the external source). With such a plugin the deployment
@@ -80,4 +80,4 @@ plugins:
 web:
   enabled: true
   host: 0.0.0.0
-  port: 12347
+  port: 8080

@@ -350,18 +350,18 @@ workbench: 2 plugin(s) loaded of 25 rostered (23 available, 0 disabled, 0 failed
 ## Web UI (`web`)
 
 `workbench web` (or `npm run web`) boots the kernel and starts a browser UI on
-`127.0.0.1:12348` by default. The core serves bytes and routes them; every page
+`127.0.0.1:8080` by default. The core serves bytes and routes them; every page
 comes from a plugin through the `ctx.web` seam (see
 [docs/PLUGIN-CONTRACT.md](docs/PLUGIN-CONTRACT.md) section 4c). With no UI
 plugin configured the server still boots and serves the empty shell.
 
 ```console
-$ npm run web -- --port 12348
-workbench: web UI on http://127.0.0.1:12348 (config <path>)
+$ npm run web -- --port 8080
+workbench: web UI on http://127.0.0.1:8080 (config <path>)
 ```
 
 - Bind: `--host` / `--port` flag, then `$WORKBENCH_WEB_HOST` / `$WORKBENCH_WEB_PORT`,
-  then the `web:` section of the config, then `127.0.0.1:12348`.
+  then the `web:` section of the config, then `127.0.0.1:8080`.
 - `workbench serve` (the service mode) reports the WEB state: with a web PROVIDER
   PLUGIN loaded (from an external source) that plugin owns the published port -
   the browser UI, its shell/assets/routes AND `/health` all answer on it. With
@@ -399,19 +399,19 @@ not satisfy the schema (missing required, wrong type, unknown parameter) and
 serving. A validation failure is never a silent coercion and never a 500.
 
 ```console
-$ curl -s http://127.0.0.1:12348/api/tools
+$ curl -s http://127.0.0.1:8080/api/tools
 {"status":"ok","contract":"tools@1","count":1,"tools":[{"name":"hello greet","description":"greets one person: required name, optional greeting and times","plugin":"hello-tool","parameters":{"type":"object","properties":{"name":{"type":"string"},"greeting":{"type":"string"},"times":{"type":"integer"}},"required":["name"]}}]}
 
-$ curl -s -X POST http://127.0.0.1:12348/api/tools/hello%20greet -d '{"name":"Ada","times":2}'
+$ curl -s -X POST http://127.0.0.1:8080/api/tools/hello%20greet -d '{"name":"Ada","times":2}'
 {"status":"ok","tool":"hello greet","result":{"message":"Hello, Ada! Hello, Ada!"}}
 
-$ curl -s -X POST http://127.0.0.1:12348/api/tools/hello%20greet -d '{}'
+$ curl -s -X POST http://127.0.0.1:8080/api/tools/hello%20greet -d '{}'
 {"status":"error","error":{"kind":"invalid-params","message":"invalid params for tool 'hello greet': name: missing required parameter","tool":"hello greet","violations":["name: missing required parameter"]}}
 
-$ curl -s -X POST http://127.0.0.1:12348/api/tool/call -d '{"tool":"hello greet","params":{"name":"Ada"}}'
+$ curl -s -X POST http://127.0.0.1:8080/api/tool/call -d '{"tool":"hello greet","params":{"name":"Ada"}}'
 {"status":"ok","tool":"hello greet","result":{"message":"Hello, Ada!"}}
 
-$ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:12348/api/tools/nope
+$ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8080/api/tools/nope
 404
 ```
 
@@ -420,7 +420,7 @@ $ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:12348/api/to
 | Command | Description |
 | --- | --- |
 | `workbench serve` | Boot the plugins and keep running (service mode). The core binds NO port: with a `web@1` provider plugin loaded that plugin serves the Web UI and `/health` on the port it resolves (`WORKBENCH_PORT`, `--port` / `--web-port`). |
-| `workbench web` | Boot the plugins and serve the plugin-composed Web UI (default `127.0.0.1:12348`). |
+| `workbench web` | Boot the plugins and serve the plugin-composed Web UI (default `127.0.0.1:8080`). |
 | `workbench <command> [args...]` | Run the command registered by a plugin (longest match wins, the rest becomes args). |
 | `workbench plugins` | List loaded plugins, their source and their capabilities. |
 | `workbench commands` | List the registered commands (and the plugin that registered them). |
@@ -659,12 +659,12 @@ MIT.
 
 The repo builds its own container image from the root `Dockerfile`
 (`FROM node:22-bookworm-slim`, the core checkout, `npm ci --omit=dev`, `git` for
-`git` plugin sources, `serve` on `WORKBENCH_PORT`/12347 with `/health`):
+`git` plugin sources, `serve` on `WORKBENCH_PORT`/8080 with `/health`):
 
 ```sh
 docker build -t workbench:dev .
-docker run --rm -p 12347:12347 workbench:dev
-curl -fsS http://127.0.0.1:12347/health
+docker run --rm -p 8080:8080 workbench:dev
+curl -fsS http://127.0.0.1:8080/health
 ```
 
 The image is the **core** only: no plugin repository is vendored into it and no

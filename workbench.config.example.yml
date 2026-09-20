@@ -66,4 +66,4 @@ plugins: {}
 # web:
 #   enabled: true
 #   host: 127.0.0.1
-#   port: 12348
+#   port: 8080
