@@ -26,7 +26,20 @@ sources:
   #
   # An EXTERNAL plugin repository, the production shape: the core clones it into
   # WORKBENCH_CACHE_DIR (/var/cache/workbench, writable in the image) and scans
-  # the `plugins` subtree.
+  # the given `subdir`.
+  #
+  # The repository has TWO plugin trees (since the provider/consumer split), so
+  # it needs TWO sources: `core/` holds the capability PROVIDERS and service
+  # hosts (including `web-impl`), `plugins/` holds the consumers and the Web UI.
+  # A single `subdir: plugins` source is NOT enough: the `web-impl` row below
+  # would name a plugin that is never DISCOVERED, the deployment would report
+  # `web is DEFERRED` and answer no `/health` at all - which is exactly how this
+  # job failed for v0.0.5. Keep both sources in sync with the repository layout.
+  - kind: git
+    id: workbench-plugins-core
+    url: https://github.com/nexuslbs/workbench-plugins
+    ref: main
+    subdir: core
   - kind: git
     id: workbench-plugins
     url: https://github.com/nexuslbs/workbench-plugins

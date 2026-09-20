@@ -61,9 +61,13 @@ run-time input, the image is created ONCE and never changes:
 
 `deploy/ci/deployment.config.yml` is the config the CI validation uses: NO core
 plugin source (the image is a core checkout and the core ships ZERO plugins)
-plus the **external** `nexuslbs/workbench-plugins` repository as a `git` source,
-and the `web-impl` provider plugin rostered so the live add/remove checks can drive the
-plugin-manager seam.
+plus the **external** `nexuslbs/workbench-plugins` repository as **two** `git`
+sources (the repository has two plugin trees since the provider/consumer split:
+`subdir: core` for the capability providers and service hosts, `subdir: plugins`
+for the consumers and the Web UI - without the `core` source the rostered
+`web-impl` provider is never DISCOVERED, `web` stays DEFERRED and `/health` is
+unserved), and the `web-impl` provider plugin rostered so the live add/remove
+checks can drive the plugin-manager seam.
 
 ## Publishing (GitHub Actions, `.github/workflows/publish.yml`)
 
