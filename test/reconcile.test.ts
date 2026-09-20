@@ -252,3 +252,54 @@ test('reconcile survives a FAILING plugin: that row is an error, the others stil
     fs.rmSync(fixture.dir, { recursive: true, force: true })
   }
 })
+
+/** A plugin whose ENTRY module carries a code REVISION, so a test can PATCH it. */
+function writeCodePlugin(fixtureDir: string, revision: string): void {
+  const dir = path.join(fixtureDir, 'code-plugin')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, 'workbench.plugin.json'),
+    JSON.stringify(
+      {
+        name: 'code-plugin',
+        version: '0.1.0',
+        description: 'test fixture: its entry module is rewritten between reloads',
+        entry: 'index.js',
+        capabilities: ['command:code revision'],
+      },
+      null,
+      2,
+    ) + '\n',
+  )
+  fs.writeFileSync(
+    path.join(dir, 'index.js'),
+    `export const name = 'code-plugin'\n\nexport function apply(ctx) {\n  ctx.effect(() => ctx.workbench.registerCommand({\n    name: 'code revision',\n    description: 'reports the code of the loaded entry module',\n    run: () => ${JSON.stringify(revision)},\n  }))\n}\n\nexport default { name, inject: ['workbench'], apply }\n`,
+  )
+}
+
+test('reload RE-IMPORTS the entry module from disk: a CODE-level patch is live without a restart', async () => {
+  const fixture = externalFixture()
+  writeCodePlugin(fixture.dir, 'revision-one')
+  const configFile = writeConfig(fixture.dir, 'reconcile-code.yml', row('code-plugin', 'patched'))
+  const kernel = await createKernel({ configFile, log: quiet })
+  try {
+    assert.equal(await kernel.registry.resolve(['code', 'revision'])?.command.run([]), 'revision-one')
+
+    // PATCH THE SOURCE ON DISK (same path, no restart) and reload the RUNNING
+    // kernel: the ESM module cache must NOT keep serving the first version. The
+    // two revisions have the SAME length, so only the file identity (mtime) can
+    // distinguish them - which is exactly what the loader keys the import on.
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    writeCodePlugin(fixture.dir, 'revision-two')
+    const result = await kernel.host.reload('code-plugin')
+    assert.equal(result.ok, true, result.message)
+    assert.equal(
+      await kernel.registry.resolve(['code', 'revision'])?.command.run([]),
+      'revision-two',
+      'the reloaded plugin must run the code that is ON DISK, not the cached module',
+    )
+  } finally {
+    await kernel.dispose()
+    fs.rmSync(fixture.dir, { recursive: true, force: true })
+  }
+})

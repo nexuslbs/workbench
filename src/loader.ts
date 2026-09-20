@@ -295,6 +295,30 @@ export function discoverPlugins(options: LoadOptions): DiscoverReport {
 }
 
 /**
+ * The URL a plugin ENTRY module is imported from.
+ *
+ * Node caches an ES module by its URL for the whole life of the process, so a
+ * plain `file://` URL would serve the FIRST version of a plugin file forever:
+ * the operator patches a loaded plugin's source, calls `reload` (the
+ * plugin-manager action, the CLI or the host API) and the process re-instantiates
+ * the STALE module - the file on disk is right, the running process is not, and
+ * only a restart used to fix that.
+ *
+ * The `wb` query carries the entry file's identity (mtime + size), so an EDITED
+ * file gets a new URL and is really read again, while re-loading an UNCHANGED
+ * file keeps the same URL and is served from the cache, exactly like a normal
+ * import. A query never takes part in module RESOLUTION, so the plugin's own
+ * relative imports keep resolving against its directory; an edited HELPER file
+ * is therefore still served from the cache until the entry changes - which is
+ * what the reload contract promises (reload = re-read the entry and re-apply).
+ */
+export function moduleUrl(file: string): string {
+  const stat = fs.statSync(file)
+  const url = pathToFileURL(file)
+  url.searchParams.set('wb', `${stat.mtimeMs}-${stat.size}`)
+  return url.href
+}
+/**
  * Imports and loads ONE discovered plugin into the context, attributing its
  * registrations to it, and returns the {@link LoadedPlugin} plus its fiber.
  *
@@ -315,7 +339,7 @@ export async function loadDiscovered(
   const file = path.resolve(discovery.dir, readManifest(discovery.dir).entry)
   if (!fs.existsSync(file)) throw new Error(`entry module not found: ${file}`)
   const known = workbench.commandNames()
-  const mod = (await import(pathToFileURL(file).href)) as unknown
+  const mod = (await import(moduleUrl(file))) as unknown
   const plugin = normalizeExport(mod, { ...(readManifest(discovery.dir) as PluginManifest) }, file)
   // Plugin objects are user supplied: cordis' generic plugin signature cannot be
   // expressed for a dynamically imported module, so the context call is cast.
