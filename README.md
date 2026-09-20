@@ -221,26 +221,47 @@ The two operations above are how a *config change* reaches a running process.
 This one is the explicit entry point for "the sources moved, pull them": it
 refreshes the SOURCE CHECKOUTS themselves, with no config edit and no restart.
 
+Real output, on a config with TWO sources: a `path` fixture source `core`
+(`/opt/workbench/plugins`, holding `hello-world`) and a local git source `demo`
+(`/srv/git/demo-plugins`, ref `main`). Only the commit shas depend on the refs
+you point at; every line and every count below is what the code prints.
+
 ```console
-$ docker exec <container> node dist/cli.js sources list
-workbench: listed 3 source(s) from /opt/workbench/workbench.config.yml: 0 changed, 0 plugin(s) re-imported, 0 error(s); no config write, no restart
-  core (path, external: false): unchanged at (none)
+$ node dist/cli.js sources list --config /opt/workbench/workbench.config.yml
+listed 2 source(s) from /opt/workbench/workbench.config.yml: 0 changed, 0 plugin(s) re-imported, 0 error(s); no config write, no restart
+  core (path): unchanged at (none)
     dir: /opt/workbench/plugins  deps: none
-    plugins: hello-world, ...
-  plugins (git, https://github.com/nexuslbs/workbench-plugins, ref v0.0.8): unchanged at 4f0a9c1ab77e
-    dir: /var/lib/workbench/sources/plugins/plugins  deps: provisioned
-    plugins: plugin-manager, web-impl, ...
+    plugins: hello-world
+  demo (git, /srv/git/demo-plugins, ref main): unchanged at 3629bbd5f643
+    dir: /var/lib/workbench/sources/demo/plugins  deps: none
+    plugins: git-demo
   ok=true persisted=false operation=list changed=none re-imported=none errors=none
 
-$ docker exec <container> node dist/cli.js sources update
-workbench: the RUNNING process (pid 1) refreshed the plugin sources out-of-band via /tmp/workbench-control-3f1c0a9b77d2.sock
-workbench: updated 3 source(s) from /opt/workbench/workbench.config.yml: 1 changed, 2 plugin(s) re-imported, 0 error(s); no config write, no restart
-  plugins (git, https://github.com/nexuslbs/workbench-plugins, ref v0.0.8): 4f0a9c1ab77e -> 9d21e0f4c8a1 CHANGED
-    dir: /var/lib/workbench/sources/plugins/plugins  deps: cached (npm ci --omit=dev)
-    plugins: plugin-manager, web-impl, ...
-    re-imported: web-impl, plugin-manager
-  ok=true persisted=false operation=update changed=plugins re-imported=web-impl, plugin-manager errors=none
+$ node dist/cli.js sources list --config /opt/workbench/workbench.config.yml --id core
+listed 1 source(s) from /opt/workbench/workbench.config.yml: 0 changed, 0 plugin(s) re-imported, 0 error(s); no config write, no restart
+  core (path): unchanged at (none)
+    dir: /opt/workbench/plugins  deps: none
+    plugins: hello-world
+  ok=true persisted=false operation=list changed=none re-imported=none errors=none
+
+$ node dist/cli.js sources update --config /opt/workbench/workbench.config.yml --id core
+sources update failed: source 'core' is a 'path' source: there is nothing to fetch (a path source IS the directory the config names)
+  ok=false persisted=false operation=update changed=none re-imported=none errors=none
+
+$ node dist/cli.js sources update --config /opt/workbench/workbench.config.yml
+workbench: the RUNNING process (pid 1087) refreshed the plugin sources out-of-band via /tmp/wb2681.sock
+updated 1 source(s) from /opt/workbench/workbench.config.yml: 1 changed, 1 plugin(s) re-imported, 0 error(s); no config write, no restart
+  demo (git, /srv/git/demo-plugins, ref main): 3629bbd5f643 -> 314623cd0cd8 CHANGED
+    dir: /var/lib/workbench/sources/demo/plugins  deps: none
+    plugins: git-demo
+    re-imported: git-demo
+  ok=true persisted=false operation=update changed=demo re-imported=git-demo errors=none
 ```
+
+(The `update` above ran while a workbench process was serving that config; the
+`demo` plugin was re-imported from the moved checkout and answered with the NEW
+code with no restart. A second `sources update` in a row prints `unchanged at
+314623cd0cd8` and re-imports nothing.)
 
 - **`update`** (the default selection is every `kind: git` source; `--id
   <source-id>` limits it to one, repeatable): fetch + `checkout --force --detach`
@@ -250,9 +271,15 @@ workbench: updated 3 source(s) from /opt/workbench/workbench.config.yml: 1 chang
   lockfile names, exactly as described above) and re-imports the plugins whose
   code moved under the process through the loader's module-graph drift pass, so
   the NEW code answers with no restart.
-- **`list`** reads only: no fetch, no install, no import. It reports the checkout
+- **`list`** reads only: no fetch, no install, no import. It covers EVERY
+  configured source - a `path` source is reported with its directory, its
+  dependency state and the plugins it provides, and with `url` / `ref` /
+  `resolvedCommit` all `null` and `changed: false` - and reports the checkout
   directory, the resolved commit (`git rev-parse HEAD`) and the dependency state
-  read from disk (`provisioned` / `stale` / `missing` / `none`).
+  read from disk (`provisioned` / `stale` / `missing` / `none`). `--id
+  <source-id>` works for any of them, `path` sources included. A TARGETED walk
+  (`--id`) keeps the discoveries of the sources it did NOT walk, so refreshing
+  one source never makes another source's plugins vanish from the report.
 - **The config file is the truth.** There is deliberately NO `--ref` (or any
   other source-coordinate) override: a refresh can only fetch the `url`/`ref` the
   config declares, so it can never leave the process serving something the file
@@ -278,10 +305,12 @@ workbench: updated 3 source(s) from /opt/workbench/workbench.config.yml: 1 chang
   operation, not a side effect of a converge.
 - **What it does NOT do**: no restart, no container lifecycle, no config write,
   no `plugins:` roster change, no dependency install outside the source
-  checkout. A `path` source and an unknown `--id` are refused BY NAME (a path
-  source IS the directory the config names; there is nothing to fetch), and a
-  failing source is a typed diagnostic naming id + url + ref + git's stderr while
-  the other sources still refresh.
+  checkout. `update` refuses a `path` source and an unknown `--id` BY NAME (there
+  is nothing for a fetch to do: a path source IS the directory the config
+  names), while `list` covers every configured source - so what a fetch cannot
+  apply to is still reported, never hidden. A failing source is a typed
+  diagnostic naming id + url + ref + git's stderr while the other sources still
+  refresh.
 
 When to run it: a `ref` bump, a new commit on a branch ref such as `main`, a
 wiped cache volume (it re-clones), or a checkout whose `node_modules` is missing

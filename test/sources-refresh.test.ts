@@ -17,9 +17,15 @@
 //   * a REFRESH never writes the config file (`persisted: false`, same sha256),
 //   * `list` only READS: it reports the checkout's commit and dependency state
 //     without fetching (a new commit in the remote is NOT picked up by `list`),
+//   * `list` covers EVERY configured source, the `kind: path` ones INCLUDED: a
+//     path source has no url/ref/commit (all `null`, `changed: false`), but it
+//     IS reported with its directory, dependency state and plugins - a listing
+//     that hides half of the config is what this rework fixes,
+//   * `update` stays GIT-ONLY: `--id <path-source>` is refused BY NAME,
 //   * dependency provisioning of the checkout rides the refresh (`npm ci
 //     --omit=dev` through the lockfile package manager - stubbed, no network),
-//   * an unknown id and a `path` source are refused BY NAME (never guessed).
+//   * an unknown id is refused BY NAME in both halves, and `update --id <path
+//     source>` is refused BY NAME too (never guessed).
 //
 // The source repository is a REAL git repository in a temp directory: a mock
 // would not prove that the fetch + forced detached checkout plumbing works.
@@ -222,12 +228,32 @@ test('sources update: re-clones a missing checkout, follows a NEW commit on the 
       'an unchanged source replaces no fiber: the command function is the same object',
     )
 
-    // `list` only READS: the remote has moved on, the checkout has not.
+    // `list` only READS: the remote has moved on, the checkout has not. It also
+    // covers EVERY configured source - the `path` source included: there is no
+    // url/ref/commit to report for it, but there IS a directory, a dependency
+    // state and a set of plugins.
     const listed = await kernel.host.refreshSources({ operation: 'list' })
     assert.equal(listed.ok, true, listed.message)
     assert.equal(listed.operation, 'list')
-    assert.equal(listed.sources[0].resolvedCommit, second, 'list never fetches')
-    assert.equal(listed.sources[0].dependency, 'none', 'the fixture declares no package.json')
+    assert.equal(listed.target, '(all sources)')
+    assert.deepEqual(listed.sources.map((entry) => entry.id), ['core', 'demo'])
+    const listedGit = listed.sources.find((entry) => entry.id === 'demo')
+    assert.ok(listedGit, 'the git source is listed')
+    assert.equal(listedGit.resolvedCommit, second, 'list never fetches')
+    assert.equal(listedGit.dependency, 'none', 'the fixture declares no package.json')
+    const listedPath = listed.sources.find((entry) => entry.id === 'core')
+    assert.ok(listedPath, 'the path source is listed too')
+    assert.equal(listedPath.kind, 'path')
+    assert.equal(listedPath.url, null)
+    assert.equal(listedPath.ref, null)
+    assert.equal(listedPath.previousCommit, null)
+    assert.equal(listedPath.resolvedCommit, null)
+    assert.equal(listedPath.changed, false)
+    assert.equal(listedPath.dir, FIXTURE_PLUGINS)
+    assert.equal(listedPath.dependency, 'none', 'the fixture plugin source declares no package.json')
+    assert.deepEqual(listedPath.plugins, ['hello-world'])
+    assert.deepEqual(listed.changed, [], 'nothing changed by a READ-ONLY listing')
+    assert.deepEqual(listed.reimported, [], 'a listing re-imports nothing')
 
     // (c) A CONFIG `ref` CHANGE (the config is the truth; there is deliberately
     // no `--ref` override): the second ref is checked out IN PLACE.
@@ -269,6 +295,33 @@ test('sources update --id: refreshes ONE source, and refuses an unknown id or a 
     const pathSource = await kernel.host.refreshSources({ operation: 'update', ids: ['core'] })
     assert.equal(pathSource.ok, false)
     assert.match(pathSource.message, /source 'core' is a 'path' source/)
+
+    // The READ-ONLY half covers the SAME path source: an operator listing the
+    // sources sees every configured source, not only the ones a fetch applies to.
+    const pathList = await kernel.host.refreshSources({ operation: 'list', ids: ['core'] })
+    assert.equal(pathList.ok, true, pathList.message)
+    assert.deepEqual(pathList.sources.map((entry) => entry.id), ['core'])
+    assert.equal(pathList.target, 'core')
+    const pathEntry = pathList.sources[0]
+    assert.equal(pathEntry.kind, 'path')
+    assert.equal(pathEntry.dir, FIXTURE_PLUGINS)
+    assert.equal(pathEntry.url, null)
+    assert.equal(pathEntry.ref, null)
+    assert.equal(pathEntry.resolvedCommit, null)
+    assert.equal(pathEntry.changed, false)
+    assert.deepEqual(pathEntry.plugins, ['hello-world'])
+
+    // A mixed selection lists BOTH kinds.
+    const bothListed = await kernel.host.refreshSources({ operation: 'list', ids: ['demo', 'core'] })
+    assert.equal(bothListed.ok, true, bothListed.message)
+    assert.deepEqual(bothListed.sources.map((entry) => entry.kind), ['git', 'path'])
+
+    // An unknown id is refused by NAME in the READ-ONLY half too: what the
+    // operator asked for does not exist, and guessing is what hides a typo.
+    const unknownList = await kernel.host.refreshSources({ operation: 'list', ids: ['nope'] })
+    assert.equal(unknownList.ok, false)
+    assert.equal(unknownList.sources.length, 0)
+    assert.match(unknownList.message, /no configured source with id 'nope'/)
   } finally {
     await kernel.dispose()
     fs.rmSync(dir, { recursive: true, force: true })

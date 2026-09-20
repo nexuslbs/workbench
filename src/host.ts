@@ -416,9 +416,15 @@ export class Host implements HostApi {
       if (entry === undefined) this.entries.set(discovery.name, { discovery, state: this.restState(discovery.name) })
       else entry.discovery = discovery
     }
+    // A TARGETED walk only OWNS the discoveries of the sources it walked: the
+    // plugins of the sources left out are KEPT, exactly like their reports -
+    // otherwise refreshing one source would make the plugins of every other
+    // source vanish from the inventory until that source is walked again.
+    const walked = only === undefined ? null : new Set(only)
     for (const [name, entry] of [...this.entries]) {
       if (seen.has(name)) continue
       if (entry.state === 'loaded') continue
+      if (walked !== null && !walked.has(entry.discovery.source)) continue
       this.entries.delete(name)
     }
     this.syncRegistry()
@@ -722,9 +728,16 @@ export class Host implements HostApi {
    * The config FILE is the truth and is NEVER written (`persisted: false`): the
    * verb deliberately offers NO `ref` override, so a refresh can never leave the
    * process in a state that contradicts the file on disk. A ref bump is applied
-   * by editing the config `ref` and calling this - which is also why a `path`
-   * source, and an unknown id, are refused by name instead of being guessed.
-   * Failures are per source: one broken source never stops the others.
+   * by editing the config `ref` and calling this.
+   *
+   * The two halves do NOT cover the same set, because they do not do the same
+   * thing: `update` FETCHES, so it covers the `kind: git` sources (a `path`
+   * source has nothing to fetch and is refused BY NAME), while `list` only READS
+   * and therefore covers EVERY configured source - a `path` source is reported
+   * with its directory, dependency state and plugins, and with `url`/`ref`/
+   * `previousCommit`/`resolvedCommit` all `null` (`changed: false`). An unknown
+   * id is refused by name in both halves instead of being guessed. Failures are
+   * per source: one broken source never stops the others.
    */
   async refreshSources(options: SourceRefreshOptions = {}): Promise<HostSourceRefreshReport> {
     const operation: SourceRefreshOperation = options.operation ?? 'update'
@@ -739,7 +752,7 @@ export class Host implements HostApi {
       // The config FILE is the truth, re-read exactly like the boot and
       // `reconcile` read it: its `url`/`ref` are what gets fetched.
       this.reloadConfig()
-      const specs = this.selectSources(options.ids)
+      const specs = this.selectSources(operation, options.ids)
       const selected = specs.map((spec) => sourceId(spec, this.options.configDir))
       // The PREVIOUS commit of every selected checkout, read BEFORE anything is
       // fetched: that is what makes the report an honest `old -> new` statement
@@ -766,10 +779,13 @@ export class Host implements HostApi {
         const id = sourceId(spec, this.options.configDir)
         const report = this.sourceReports.find((entry) => entry.id === id)
         const checkout = sourceCheckout(spec, this.options.configDir, this.options.cacheDir)
-        const dir = report?.dir ?? checkout
+        const dir = report?.dir ?? this.sourceDirOf(spec)
         const resolvedCommit = checkout === null ? null : (report?.commit ?? readCheckoutCommit(checkout))
         const previousCommit = previous.get(id) ?? null
         const sourceChanged = checkout !== null && previousCommit !== resolvedCommit
+        // The plugins this process has from the source: LOADED or merely
+        // discovered (available). A `path` source that is not on the roster
+        // still says what it holds - a listing must not hide it.
         const plugins = [...this.entries.values()]
           .filter((entry) => entry.discovery.source === id)
           .map((entry) => entry.discovery.name)
@@ -808,7 +824,12 @@ export class Host implements HostApi {
     return {
       ok,
       action: 'sources-update',
-      target: options.ids === undefined || options.ids.length === 0 ? '(all git sources)' : options.ids.join(', '),
+      target:
+        options.ids === undefined || options.ids.length === 0
+          ? operation === 'list'
+            ? '(all sources)'
+            : '(all git sources)'
+          : options.ids.join(', '),
       request: { operation, ids: options.ids ?? [] },
       persisted: false,
       before,
@@ -823,30 +844,49 @@ export class Host implements HostApi {
   }
 
   /**
-   * The sources a `sources` operation covers: every configured `kind: git`
-   * source, or EXACTLY the ids asked for. An unknown id, and a `path` source -
-   * which has nothing to fetch - are refused BY NAME: guessing what the operator
-   * meant is what leaves a process serving something the config does not say.
+   * The sources a `sources` operation covers - or EXACTLY the ids asked for.
+   *
+   * The two halves cover DIFFERENT sets on purpose: `update` fetches, so it
+   * covers the `kind: git` sources and refuses a `path` source BY NAME (a path
+   * source IS the directory the config names: there is nothing for a refresh to
+   * do, and reporting one would be a lie); `list` only reads, so it covers EVERY
+   * configured source - a `path` source is exactly the thing an operator listing
+   * the sources wants to see next to the checkouts. An unknown id is refused by
+   * name in both halves: guessing what the operator meant is what leaves a
+   * process serving something the config does not say.
    */
-  private selectSources(ids?: readonly string[]): SourceSpec[] {
+  private selectSources(operation: SourceRefreshOperation, ids?: readonly string[]): SourceSpec[] {
     const configured = this.rawConfig().sources
-    const git = configured.filter((spec) => spec.kind === 'git')
+    const covered = operation === 'list' ? configured : configured.filter((spec) => spec.kind === 'git')
     if (ids === undefined || ids.length === 0) {
-      if (git.length === 0) {
+      if (operation === 'update' && covered.length === 0) {
         throw new Error("no 'git' source is configured: there is nothing to update ('workbench sources list' shows the configured sources)")
       }
-      return git
+      return covered
     }
     const selected: SourceSpec[] = []
     for (const id of ids) {
       const spec = configured.find((candidate) => sourceId(candidate, this.options.configDir) === id)
       if (spec === undefined) throw new Error(`no configured source with id '${id}' (see 'workbench sources list')`)
-      if (spec.kind !== 'git') {
+      if (operation === 'update' && spec.kind !== 'git') {
         throw new Error(`source '${id}' is a 'path' source: there is nothing to fetch (a path source IS the directory the config names)`)
       }
       selected.push(spec)
     }
     return selected
+  }
+
+  /**
+   * The directory a source OWNS, without resolving anything: the checkout for a
+   * `kind: git` source, the directory the config names for a `kind: path` source
+   * (there is nothing to fetch there: the directory IS the source). `null` only
+   * when the spec cannot be placed at all. This is what lets the READ-ONLY half
+   * report a `path` source - it never fetches, so it must never resolve.
+   */
+  private sourceDirOf(spec: SourceSpec): string | null {
+    const checkout = sourceCheckout(spec, this.options.configDir, this.options.cacheDir)
+    if (checkout !== null) return checkout
+    return spec.kind === 'path' ? path.resolve(this.options.configDir, spec.path ?? '') : null
   }
 
   /**

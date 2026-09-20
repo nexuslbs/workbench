@@ -57,14 +57,17 @@ Usage:
                                   running one); --json prints the full per-plugin
                                   report; exit 1 when a row failed, the others
                                   still converged
-  workbench sources list          list the configured plugin sources: id, kind,
+  workbench sources list          list EVERY configured plugin source: id, kind,
                                   url, ref, checkout dir, resolved commit and the
-                                  dependency state of the checkout. READS ONLY -
-                                  no fetch, no install, no import. --id limits it
-                                  to one source; --json prints the full report
+                                  dependency state of the checkout (a 'path'
+                                  source has no url/ref/commit - its directory,
+                                  dependency state and plugins are reported).
+                                  READS ONLY - no fetch, no install, no import.
+                                  --id limits it to one source; --json prints the
+                                  full report
   workbench sources update [--id <source-id>]
-                                  UPDATE the plugin sources IN PLACE: for every
-                                  selected source fetch + forced detached
+                                  UPDATE the plugin 'git' sources IN PLACE: for
+                                  every selected source fetch + forced detached
                                   checkout of the ref the CONFIG declares,
                                   provision the checkout's dependencies, then
                                   RE-IMPORT the plugins whose code moved under
@@ -105,7 +108,8 @@ Options:
   --web-port <n>   serve only: Web UI port when the config enables the UI;
                    set it to the status port (--port) to serve the UI AND
                    /health on ONE listener
-  --id <source-id> 'workbench sources': limit list/update to ONE source (repeatable)
+  --id <source-id> 'workbench sources': limit list/update to ONE source (repeatable;
+                   'update' covers 'git' sources only)
   --no-external    skip external plugin sources
   --json           machine readable output
   --help           this text
