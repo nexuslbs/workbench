@@ -72,8 +72,12 @@ npm run dev -- --config /path/to/that/config.yml hello world   # -> Hello World
 CONFIG_FILE=/path/to/that/config.yml npm run dev -- plugins     # same thing
 ```
 
-A PRIVATE git source carries a credential REFERENCE BY NAME, never a value -
-resolved before any plugin loads (see [docs/CREDENTIALS.md](docs/CREDENTIALS.md)):
+A PRIVATE git source carries a credential REFERENCE BY NAME, never a value. The
+core ships NO credential provider, so the value is resolved through the
+credentials SERVICE, whose provider is a PLUGIN (`credentials-basic`): the kernel
+walks the credential-FREE sources FIRST (that is where the provider plugin comes
+from) and DEFERS an `auth` source until a provider plugin has been registered in
+the same boot (see [docs/CREDENTIALS.md](docs/CREDENTIALS.md), section 6):
 
 ```yaml
 sources:
