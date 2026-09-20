@@ -223,11 +223,12 @@ refreshes the SOURCE CHECKOUTS themselves, with no config edit and no restart.
 
 Real output, on a config with TWO sources: a `path` fixture source `core`
 (`/opt/workbench/plugins`, holding `hello-world`) and a local git source `demo`
-(`/srv/git/demo-plugins`, ref `main`). Only the commit shas depend on the refs
-you point at; every line and every count below is what the code prints.
+(`/srv/git/demo-plugins`, ref `main`). Only the pid, the socket path and the
+commit shas are environment-specific: every line below is verbatim output.
 
 ```console
 $ node dist/cli.js sources list --config /opt/workbench/workbench.config.yml
+workbench: the RUNNING process (pid 1087) refreshed the plugin sources out-of-band via /tmp/wb2681.sock
 listed 2 source(s) from /opt/workbench/workbench.config.yml: 0 changed, 0 plugin(s) re-imported, 0 error(s); no config write, no restart
   core (path): unchanged at (none)
     dir: /opt/workbench/plugins  deps: none
@@ -237,14 +238,14 @@ listed 2 source(s) from /opt/workbench/workbench.config.yml: 0 changed, 0 plugin
     plugins: git-demo
   ok=true persisted=false operation=list changed=none re-imported=none errors=none
 
-$ node dist/cli.js sources list --config /opt/workbench/workbench.config.yml --id core
+$ node dist/cli.js sources list --config /opt/workbench/workbench.config.yml --local --id core
 listed 1 source(s) from /opt/workbench/workbench.config.yml: 0 changed, 0 plugin(s) re-imported, 0 error(s); no config write, no restart
   core (path): unchanged at (none)
     dir: /opt/workbench/plugins  deps: none
     plugins: hello-world
   ok=true persisted=false operation=list changed=none re-imported=none errors=none
 
-$ node dist/cli.js sources update --config /opt/workbench/workbench.config.yml --id core
+$ node dist/cli.js sources update --config /opt/workbench/workbench.config.yml --local --id core
 sources update failed: source 'core' is a 'path' source: there is nothing to fetch (a path source IS the directory the config names)
   ok=false persisted=false operation=update changed=none re-imported=none errors=none
 
