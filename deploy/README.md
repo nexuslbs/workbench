@@ -28,9 +28,12 @@ curl -fsS http://127.0.0.1:12347/health   # -> {"status":"ok",...}
   vendored into it, no deployment config is baked in, no secret is baked in.
 - **The image ships NO browser**: no chromium and no playwright browser cache
   are baked in, and no `PLAYWRIGHT_BROWSERS_PATH` is set. Driving a real browser
-  is a deployment INPUT: run ONE browser service from its OWN image (e.g.
-  `mcr.microsoft.com/playwright:v1.63.0-noble` started with
-  `--remote-debugging-port=9222`) and declare it in the deployment config as
+  is a deployment INPUT: run ONE browser service from its OWN image - built and
+  published from the PLUGINS repository as
+  `ghcr.io/nexuslbs/workbench-plugins/browser:X.Y.Z` (`nexuslbs/workbench-plugins`:
+  `browser/Dockerfile` + `.github/workflows/browser-publish.yml`, published on a
+  `browser-X.Y.Z` tag; the upstream `mcr.microsoft.com/playwright:v1.63.0-noble`
+  is an equivalent) - and declare it in the deployment config as
   `browserService` (endpoint + image + the `general-service@1` instance + the
   start command). The `browser-use-playwright` provider of the
   `workbench-plugins` source ATTACHES to it over CDP; a missing/unreachable

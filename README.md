@@ -518,19 +518,23 @@ browser cache are baked into it. Driving a real browser is a DEPLOYMENT input,
 exactly like a plugin source: run ONE browser service from its OWN image and
 point the `browser-use-playwright` provider at it.
 
+The browser service image itself is built and published from the PLUGINS
+repository, `nexuslbs/workbench-plugins` (`browser/Dockerfile` +
+`.github/workflows/browser-publish.yml`): pushing a tag `browser-X.Y.Z`
+publishes `ghcr.io/nexuslbs/workbench-plugins/browser:X.Y.Z` (and `:latest`).
+The core repository ships NO browser image and no longer builds one.
+
 ```sh
 docker run -d --name workbench-browser \
   -p 127.0.0.1:9222:9222 \
-  mcr.microsoft.com/playwright:v1.63.0-noble \
-  /bin/bash -lc 'exec /ms-playwright/chromium-*/chrome-linux*/chrome --headless --no-sandbox \
-    --remote-debugging-address=0.0.0.0 --remote-debugging-port=9222 about:blank'
+  ghcr.io/nexuslbs/workbench-plugins/browser:0.0.1
 ```
 
 ```yaml
 browser-use-playwright:
   browserService:
     endpoint: http://127.0.0.1:9222
-    image: mcr.microsoft.com/playwright:v1.63.0-noble
+    image: ghcr.io/nexuslbs/workbench-plugins/browser:0.0.1
     generalService: { type: container, params: { container: workbench-browser } }
     start: '<start chromium with --remote-debugging-port=9222>'
 ```
