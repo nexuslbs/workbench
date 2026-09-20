@@ -348,6 +348,27 @@ signal reload; a changed file reaches a RUNNING process only through the core's
   and a restart used to be the only way out. `--local` forces a one-shot
   converge of the calling process instead.
 
+Two loader guarantees make that path usable for a plugin family, not just for a
+single file:
+
+- **the whole module graph moves together.** The identity a plugin entry is
+  imported under is applied by a loader-owned module RESOLVE hook to every module
+  resolved inside the source, so a relative helper a plugin shares (`./shared.ts`,
+  `../../definitions/x.ts`) is re-read with the entry. An entry whose helper grew
+  a new export can therefore never be linked against the PREVIOUS checkout of that
+  helper (the `does not provide an export named ...` failure), and a plugin author
+  does not have to avoid relative imports or inline helpers to stay reloadable.
+- **the checkout's dependencies are provisioned by source resolution.** A `git`
+  source with a `package.json` gets its lockfile install (`npm ci --omit=dev` by
+  default) before any plugin of that source is imported, so a provider may import
+  its dependency directly (`import 'playwright-core'`); it must NOT vendor the
+  dependency, ship its own install step, or assume it runs inside the repository
+  that has it. A provisioned checkout is reported on the resolved source
+  (`dependencies: { status: provisioned | cached | skipped | failed, command,
+  dir }`), and a failure is the typed `source-dependencies-unavailable`
+  diagnostic - the provider still answers its own typed
+  `provider-unavailable` if it is loaded without the module.
+
 A plugin therefore never has to own the converge operation: it either CALLS
 `ctx.workbench.host()` for a load/reconcile, or it exposes a route that does.
 The inventory surface (`/health`, `/api/plugins`) reports

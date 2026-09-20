@@ -38,6 +38,7 @@ import {
 } from './loader.ts'
 import { controlSocketPath } from './control.ts'
 import { resolveSource, sourceId, type SourceAuthOutcome } from './sources.ts'
+import { driftedSourceGraphs } from './module-graph.ts'
 import {
   renderCapability,
   type CommandInfo,
@@ -713,7 +714,14 @@ export class Host implements HostApi {
       this.reloadConfig()
       await this.refreshSourceAuths()
       this.refresh()
-      const summary = await this.applyDesiredRoster(changes)
+      // The re-scan just RE-RESOLVED every source, so a ref bump or an in-place
+      // re-checkout that happened under the running process is visible NOW: the
+      // sources whose loaded code no longer matches the code on disk are
+      // re-imported even when no roster row changed (their stale module graph
+      // would otherwise survive until a restart - the live-swap defect).
+      const drift = driftedSourceGraphs()
+      if (drift.size > 0) this.options.log(`host: ${drift.size} source(s) changed under the process, re-importing their plugins`)
+      const summary = await this.applyDesiredRoster(changes, drift)
       this.syncRegistry()
       // A provider plugin loaded by THIS call can unblock the `${cred:...}`
       // sources: re-resolve the auths and re-scan once more, so the report shows
@@ -755,7 +763,7 @@ export class Host implements HostApi {
    * generation. A plugin that cannot be applied records `error` and the
    * remaining plugins STILL converge - one bad row never aborts the roster.
    */
-  private async applyDesiredRoster(changes: ReconcileChange[]): Promise<string> {
+  private async applyDesiredRoster(changes: ReconcileChange[], drift: ReadonlySet<string> = new Set()): Promise<string> {
     // The DESIRED state: the config as written (references stay BY NAME).
     const roster = (this.writtenConfig().plugins ?? {}) as Record<string, Record<string, unknown>>
     const desired = Object.keys(roster)
@@ -841,8 +849,11 @@ export class Host implements HostApi {
       }
 
       // Already converged: the plugin is loaded with EXACTLY this config, so no
-      // fiber is touched (the idempotency guarantee).
-      if (wasLoaded && entry?.config !== undefined && stable(entry.config) === stable(config)) {
+      // fiber is touched (the idempotency guarantee) - UNLESS the source it was
+      // loaded from changed under the process, in which case the loaded module
+      // graph is stale by definition and the plugin is re-imported.
+      const drifted = entry === undefined || drift.size === 0 ? false : [...drift].some((root) => entry.discovery.dir === root || entry.discovery.dir.startsWith(root + path.sep))
+      if (wasLoaded && entry?.config !== undefined && stable(entry.config) === stable(config) && !drifted) {
         changes.push({ name, desired: true, loaded: true, action: 'unchanged', reason: 'already loaded with this exact config' })
         unchanged += 1
         continue
@@ -857,7 +868,13 @@ export class Host implements HostApi {
         this.entries.set(name, { discovery, state: 'loaded', fiber, config })
         if (replacing) {
           reloaded += 1
-          changes.push({ name, desired: true, loaded: true, action: 'reload', reason: 'the row config changed: the fiber was replaced with the new config' })
+          changes.push({
+            name,
+            desired: true,
+            loaded: true,
+            action: 'reload',
+            reason: drifted ? 'the source changed under the process: the plugin was re-imported from the new module graph' : 'the row config changed: the fiber was replaced with the new config',
+          })
         } else {
           loaded += 1
           changes.push({ name, desired: true, loaded: false, action: 'load', reason: `loaded from source '${discovery.source}'` })

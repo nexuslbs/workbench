@@ -25,6 +25,14 @@
  * - an UPDATE is an in-place `fetch` + forced detached `checkout` of the same
  *   ref. When the update fails the source is reported as an ERROR and the
  *   loader SKIPS it entirely, so stale code is never served silently,
+ * - the resolved COMMIT of a checkout and the files under it are registered as
+ *   ONE module graph (`src/module-graph.ts`), so a ref bump or a re-checkout
+ *   invalidates the whole graph of that source and the NEW code is imported
+ *   without a restart,
+ * - the DEPENDENCIES a checkout declares (`package.json` + lockfile) are
+ *   provisioned right after the checkout lands, through the package manager the
+ *   lockfile names, and a failing install is reported as a typed diagnostic that
+ *   names the exact command - never a silent `provider-unavailable` later,
  * - every failure message NAMES the source (id + url + ref) and carries git's
  *   own stderr, so "which source is broken and why" is answerable from the log.
  *
@@ -34,7 +42,27 @@
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { packageRootOf, registerSourceGraph } from './module-graph.ts'
 import type { SourceSpec } from './types.ts'
+
+/**
+ * What happened to a checkout's DEPENDENCIES during source resolution. Reported
+ * on the resolved source (and on the source report the loader/host render), so
+ * "are the dependencies of this source installed?" is answerable without
+ * reading the operator's shell history.
+ */
+export interface DependencyProvisionReport {
+  /** Package manager the checkout declares (`npm` / `pnpm` / `yarn`). */
+  manager: string
+  /** The exact command that was run (and that an operator can run by hand). */
+  command: string
+  /** Directory the command runs in (the checkout root). */
+  dir: string
+  /** `provisioned` = installed now, `cached` = inputs unchanged, `skipped` = disabled, `failed` = install failed. */
+  status: 'provisioned' | 'cached' | 'skipped' | 'failed'
+  /** Set when the install failed or was disabled: the typed diagnostic, naming the command. */
+  error?: string
+}
 
 /** A source spec resolved to the directory that holds the plugin directories. */
 export interface ResolvedSource {
@@ -45,6 +73,8 @@ export interface ResolvedSource {
   /** Set when the source could not be resolved (missing path, git failure, ...). */
   error?: string
   external: boolean
+  /** Git sources only: the dependency provisioning outcome (absent when the source declares no package.json). */
+  dependencies?: DependencyProvisionReport
 }
 
 /**
@@ -220,6 +250,142 @@ function ensureGitCheckout(spec: SourceSpec, checkout: string, id: string, auth:
   }
 }
 
+/**
+ * Where the DEPENDENCY MARKER of a checkout lives: NEXT TO it, never inside it,
+ * so `checkout --force` cannot delete it and no plugin scan can ever see it (a
+ * source scans the plugin directories of its own tree only).
+ */
+function dependencyMarker(checkout: string): string {
+  return `${checkout}.deps.json`
+}
+
+/** How long one dependency install may take before it is reported as a failure. */
+const DEPENDENCY_INSTALL_TIMEOUT_MS = 900_000
+
+/**
+ * The package manager a checkout declares, from its LOCKFILE (npm by default),
+ * with the binary overridable through the environment (`WORKBENCH_NPM`,
+ * `WORKBENCH_PNPM`, `WORKBENCH_YARN`) - the same escape hatch `WORKBENCH_GIT`
+ * gives the git side, and what makes this step testable without a network.
+ */
+function installPlan(root: string): { manager: string; command: string[]; text: string } | null {
+  if (!fs.existsSync(path.join(root, 'package.json'))) return null
+  const has = (file: string): boolean => fs.existsSync(path.join(root, file))
+  const binary = (name: string, variable: string): string => {
+    const fromEnv = process.env[variable]?.trim()
+    return fromEnv && fromEnv.length > 0 ? fromEnv : name
+  }
+  if (has('pnpm-lock.yaml')) {
+    return { manager: 'pnpm', command: [binary('pnpm', 'WORKBENCH_PNPM'), 'install', '--frozen-lockfile', '--prod'], text: 'pnpm install --frozen-lockfile --prod' }
+  }
+  if (has('yarn.lock')) {
+    return { manager: 'yarn', command: [binary('yarn', 'WORKBENCH_YARN'), 'install', '--frozen-lockfile', '--production=true'], text: 'yarn install --frozen-lockfile --production=true' }
+  }
+  const npm = binary('npm', 'WORKBENCH_NPM')
+  if (has('package-lock.json') || has('npm-shrinkwrap.json')) {
+    return { manager: 'npm', command: [npm, 'ci', '--omit=dev'], text: 'npm ci --omit=dev' }
+  }
+  return { manager: 'npm', command: [npm, 'install', '--omit=dev'], text: 'npm install --omit=dev' }
+}
+
+/**
+ * The dependency INPUTS of a checkout: `package.json` plus every lockfile shape
+ * this module understands, as `name:size:mtime` lines. A moved lockfile - or a
+ * changed manifest - is what makes an install necessary again.
+ */
+function dependencyInputs(root: string): string {
+  return ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock']
+    .map((file) => {
+      try {
+        const stat = fs.statSync(path.join(root, file))
+        return `${file}:${stat.size}:${Math.round(stat.mtimeMs)}`
+      } catch {
+        return `${file}:absent`
+      }
+    })
+    .join('|')
+}
+
+/** The marker of the last SUCCESSFUL install, or `undefined` when there is none. */
+function readDependencyMarker(file: string): { manager?: string; inputs?: string } | undefined {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { manager?: string; inputs?: string }
+    return typeof parsed === 'object' && parsed !== null ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Provisions the DEPENDENCIES of a git source's checkout: the deterministic step
+ * between "the code is here" and "the code can be imported".
+ *
+ * It runs the package manager the lockfile names (`npm ci --omit=dev` for an
+ * npm checkout, frozen installs for pnpm/yarn) in the CHECKOUT ROOT - the only
+ * directory a plugin's `node_modules` lookup can reach - and it is IDEMPOTENT:
+ * a marker next to the checkout records the dependency INPUTS of the last
+ * successful install, so a source with its dependencies in place installs
+ * nothing on the next boot (offline-safe after the first successful run) while a
+ * changed lockfile, a missing `node_modules` or a fresh checkout install again.
+ *
+ * FAILURE IS TYPED AND LOUD: the returned report carries
+ * `source-dependencies-unavailable` plus the EXACT command and directory, so
+ * "why is this provider unavailable" is answerable from the log instead of
+ * surfacing later as a silent `provider-unavailable` inside one plugin.
+ * `WORKBENCH_SOURCE_INSTALL=off` is the explicit opt-out (reported as `skipped`,
+ * never as a silent success).
+ */
+function provisionDependencies(id: string, spec: SourceSpec, checkout: string, ref: string | undefined): DependencyProvisionReport | undefined {
+  const plan = installPlan(checkout)
+  if (plan === null) return undefined
+  const inputs = dependencyInputs(checkout)
+  const markerFile = dependencyMarker(checkout)
+  const installed = fs.existsSync(path.join(checkout, 'node_modules'))
+  const previous = readDependencyMarker(markerFile)
+  if (installed && previous?.manager === plan.manager && previous?.inputs === inputs) {
+    return { manager: plan.manager, command: plan.text, dir: checkout, status: 'cached' }
+  }
+  if ((process.env.WORKBENCH_SOURCE_INSTALL ?? '').trim().toLowerCase() === 'off') {
+    return {
+      manager: plan.manager,
+      command: plan.text,
+      dir: checkout,
+      status: 'skipped',
+      error: `${label(id, spec, ref)}: source-dependencies-skipped: dependency provisioning is disabled (WORKBENCH_SOURCE_INSTALL=off); run '${plan.text}' in ${checkout} if this source needs its dependencies`,
+    }
+  }
+  const result = spawnSync(plan.command[0], plan.command.slice(1), {
+    cwd: checkout,
+    encoding: 'utf8',
+    // npm reads a few of its own knobs from the environment: no audit/fund
+    // network round-trips, and CI=1 makes the manager non-interactive.
+    env: { ...process.env, CI: '1', npm_config_audit: 'false', npm_config_fund: 'false', npm_config_update_notifier: 'false' },
+    timeout: DEPENDENCY_INSTALL_TIMEOUT_MS,
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  if (result.error || result.status !== 0) {
+    const raw = (result.error?.message ?? result.stderr ?? result.stdout ?? '').trim()
+    const detail = raw.split('\n').filter((line) => line.trim().length > 0).slice(-4).join(' ').slice(0, 400)
+    return {
+      manager: plan.manager,
+      command: plan.text,
+      dir: checkout,
+      status: 'failed',
+      error:
+        `${label(id, spec, ref)}: source-dependencies-unavailable: '${plan.text}' failed in ${checkout}${detail ? ` (${detail})` : ''}; ` +
+        `run '${plan.text}' in ${checkout} by hand, or set WORKBENCH_SOURCE_INSTALL=off to load the source without its dependencies`,
+    }
+  }
+  fs.writeFileSync(markerFile, `${JSON.stringify({ manager: plan.manager, inputs, command: plan.text, at: new Date().toISOString() }, null, 2)}\n`)
+  return { manager: plan.manager, command: plan.text, dir: checkout, status: 'provisioned' }
+}
+
+/** The resolved commit of a checkout (its module-graph version), or null when git cannot tell. */
+function checkoutCommit(checkout: string): string | null {
+  const result = git(['rev-parse', 'HEAD'], checkout)
+  return result.ok && result.stdout.length > 0 ? result.stdout : null
+}
+
 /** Resolves a source spec to a directory. Never throws: resolution errors are reported. */
 export function resolveSource(
   spec: SourceSpec,
@@ -232,6 +398,10 @@ export function resolveSource(
     const dir = path.resolve(configDir, spec.path ?? '')
     const id = sourceId(spec, configDir)
     if (!fs.existsSync(dir)) return { id, kind: 'path', dir: null, error: `path source directory does not exist: ${dir}`, external }
+    // A path source is a module GRAPH too: the package root that holds it is
+    // registered, so a helper shared ABOVE the plugin tree (`definitions/` next
+    // to `plugins/`) is part of the same identity as the plugins that import it.
+    registerSourceGraph(packageRootOf(dir))
     return { id, kind: 'path', dir, external }
   }
 
@@ -256,6 +426,12 @@ export function resolveSource(
   } catch (error) {
     return { id, kind: 'git', dir: null, error: (error as Error).message, external }
   }
+  // The checkout landed: its COMMIT plus the files under it define the module
+  // graph of this source, so a ref bump (or any in-place re-checkout) makes the
+  // loader import the NEW code as a whole - entries AND helpers - instead of
+  // meeting a helper cached from the previous checkout.
+  registerSourceGraph(checkout, { commit: checkoutCommit(checkout) })
+  const dependencies = provisionDependencies(id, spec, checkout, spec.ref)
   const dir = spec.subdir ? path.join(checkout, spec.subdir) : checkout
   if (!fs.existsSync(dir)) {
     return {
@@ -266,5 +442,5 @@ export function resolveSource(
       external,
     }
   }
-  return { id, kind: 'git', dir, external }
+  return dependencies === undefined ? { id, kind: 'git', dir, external } : { id, kind: 'git', dir, external, dependencies }
 }

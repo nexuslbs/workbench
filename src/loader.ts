@@ -3,7 +3,8 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Context, Fiber } from 'cordis'
 import { markApplying } from './attribution.ts'
-import { resolveSource, sourceId, type ResolvedSource, type SourceAuthOutcome } from './sources.ts'
+import { moduleUrl } from './module-graph.ts'
+import { resolveSource, sourceId, type DependencyProvisionReport, type ResolvedSource, type SourceAuthOutcome } from './sources.ts'
 import {
   MANIFEST_FILE,
   normalizeCapabilities,
@@ -27,6 +28,12 @@ export interface SourceReport {
   external: boolean
   plugins: number
   error?: string
+  /**
+   * What happened to the source's DEPENDENCIES (git sources that declare a
+   * `package.json`): provisioned now, already installed, disabled - or FAILED,
+   * with the typed diagnostic naming the exact command to run.
+   */
+  dependencies?: DependencyProvisionReport
 }
 
 export interface LoadReport {
@@ -266,6 +273,16 @@ export function discoverPlugins(options: LoadOptions): DiscoverReport {
       report.sources.push(sourceReport)
       continue
     }
+    // The dependency outcome is part of the SOURCE report, and a failed or
+    // skipped install is logged LOUDLY: a plugin that answers
+    // `provider-unavailable` later must never be the first trace of a missing
+    // `node_modules` (the message names the exact command to run).
+    if (source.dependencies !== undefined) {
+      sourceReport.dependencies = source.dependencies
+      const { status, command, dir: depsDir } = source.dependencies
+      if (status === 'provisioned') options.log(`source '${source.id}': provisioned dependencies ('${command}' in ${depsDir})`)
+      else if (status === 'failed' || status === 'skipped') options.log(`source '${source.id}': ${source.dependencies.error}`)
+    }
 
     for (const dir of discoverPluginDirs(source.dir)) {
       let manifest: PluginManifest
@@ -297,27 +314,16 @@ export function discoverPlugins(options: LoadOptions): DiscoverReport {
 /**
  * The URL a plugin ENTRY module is imported from.
  *
- * Node caches an ES module by its URL for the whole life of the process, so a
- * plain `file://` URL would serve the FIRST version of a plugin file forever:
- * the operator patches a loaded plugin's source, calls `reload` (the
- * plugin-manager action, the CLI or the host API) and the process re-instantiates
- * the STALE module - the file on disk is right, the running process is not, and
- * only a restart used to fix that.
- *
- * The `wb` query carries the entry file's identity (mtime + size), so an EDITED
- * file gets a new URL and is really read again, while re-loading an UNCHANGED
- * file keeps the same URL and is served from the cache, exactly like a normal
- * import. A query never takes part in module RESOLUTION, so the plugin's own
- * relative imports keep resolving against its directory; an edited HELPER file
- * is therefore still served from the cache until the entry changes - which is
- * what the reload contract promises (reload = re-read the entry and re-apply).
+ * The identity lives in `src/module-graph.ts`: every module of a configured
+ * SOURCE is imported with ONE per-source identity, applied to the ENTRY here and
+ * to every relative helper import by the loader's resolver hook, so a file that
+ * changed on disk (or a checkout that was swapped under the process) is read
+ * again as a WHOLE GRAPH - an entry-only query would leave the helpers that the
+ * entry imports cached, which is exactly the live-swap link failure this module
+ * exists to prevent. Re-exported here because the loader is the public face of
+ * "how a plugin module is imported".
  */
-export function moduleUrl(file: string): string {
-  const stat = fs.statSync(file)
-  const url = pathToFileURL(file)
-  url.searchParams.set('wb', `${stat.mtimeMs}-${stat.size}`)
-  return url.href
-}
+export { moduleUrl } from './module-graph.ts'
 /**
  * Imports and loads ONE discovered plugin into the context, attributing its
  * registrations to it, and returns the {@link LoadedPlugin} plus its fiber.

@@ -121,6 +121,8 @@ Environment (all optional):
 | `WORKBENCH_CONTROL_SOCKET` | Path of the OUT-OF-BAND control socket `serve`/`web` serve (default `<tmpdir>/workbench-control-<hash of the config path>.sock`). See "Applying a config change to a RUNNING process". |
 | `WORKBENCH_PORT` | The port a DEPLOYMENT publishes; `serve` exports it (and `--port` / `--web-port`) into the environment the web provider plugin reads. The core binds nothing itself. |
 | `WORKBENCH_CACHE_DIR` | Where `git` plugin sources are checked out (default `<config dir>/.workbench/sources`). |
+| `WORKBENCH_SOURCE_INSTALL` | `off` disables the DEPENDENCY PROVISIONING of `git` sources (reported as `skipped`, never as a silent success). Unset/anything else = provision when a checkout's `node_modules` is missing or its lockfile changed (see "Changing a source `ref` on a LIVE process"). |
+| `WORKBENCH_NPM` / `WORKBENCH_PNPM` / `WORKBENCH_YARN` | The package-manager binaries the provisioning step runs (default `npm` / `pnpm` / `yarn`). |
 
 ## Applying a config change to a RUNNING process
 
@@ -156,6 +158,62 @@ of its own. A change reaches a running process in three ways, plus a restart:
    `1` when a row failed to converge, while the other rows still converged.
 
 A restart works too and remains the fallback.
+
+### Changing a source `ref` on a LIVE process
+
+A source is re-resolved on every scan (boot, `host.reconcile()`, `install`), so
+bumping a `git` source `ref` - or moving the branch/tag it points at - is a
+supported LIVE operation:
+
+```console
+$ # edit the config file: sources[].ref: v0.0.7 -> v0.0.8
+$ docker exec <container> node dist/cli.js reconcile
+```
+
+What the loader guarantees for that path:
+
+- **one identity per SOURCE, not per file.** Every module a source resolves - the
+  plugin ENTRY *and* every relative helper it imports, at any depth - carries the
+  same identity (`?wb=<id>`), applied by a loader-owned module RESOLVE hook. The
+  identity is the resolved COMMIT of a `git` checkout plus a content fingerprint
+  of the tree, and the in-place `fetch` + `checkout --force --detach` of a ref
+  bump moves the WHOLE graph at once: "the new entry imports a stale helper" (the
+  failure mode that produced `does not provide an export named
+  'CHALLENGE_ACTIONS'`) cannot happen, and a reconcile re-imports the new code
+  with no restart and no cache-dir surgery.
+- **an UNCHANGED source keeps its identity**, so its URLs and modules are reused
+  (no re-evaluation, no module-map growth): the `reload` contract of an unchanged
+  plugin is exactly what it was.
+- **code ON DISK is enough.** The fingerprint hashes file CONTENT, so patching an
+  entry or a helper in place (same size, same second) is picked up by the next
+  `reload` / `reconcile` too - the historical "a code-level patch reaches a
+  running process" contract, now covering the whole graph.
+- **drift is reported.** A source whose LOADED code no longer matches the code on
+  disk is one of the drift sources (`sourceGraphs()` in the reports), which is
+  why a reconcile re-imports it even when no roster row changed.
+- **dependencies are provisioned by the source, not by hand.** When a checkout has
+  a `package.json`, resolution runs the package manager its LOCKFILE names
+  (`npm ci --omit=dev` for an npm checkout, `pnpm install --frozen-lockfile
+  --prod`, `yarn install --frozen-lockfile --production=true`; the binaries are
+  overridable with `WORKBENCH_NPM` / `WORKBENCH_PNPM` / `WORKBENCH_YARN`) in the
+  checkout root, but ONLY when `node_modules` is missing or the lockfile /
+  `package.json` changed since the last successful install. A marker NEXT TO the
+  checkout records that install, so a converged deployment needs no network and
+  no install on the next boot. A FAILING install is a TYPED diagnostic naming the
+  exact command and directory -
+  `source-dependencies-unavailable: 'npm ci --omit=dev' failed in <dir> ...;
+  run 'npm ci --omit=dev' in <dir> by hand, or set
+  WORKBENCH_SOURCE_INSTALL=off ...` - instead of surfacing later as a silent
+  `provider-unavailable` inside one plugin. `WORKBENCH_SOURCE_INSTALL=off` is the
+  explicit opt-out (reported as `skipped`, never as a silent success).
+
+What an operator may and must not do: changing a source COORDINATE (`url`, `ref`,
+`subdir`) in the config and reconciling is the supported way to ship new plugin
+code, and a restart is never needed for it. The cache directory itself belongs to
+the loader: a manual `git checkout` or `npm ci` inside it is redundant (the next
+resolve re-checks out and re-provisions) and can race a fetch. Nothing must be
+copied into a checkout by hand, and `node_modules` must never be committed to a
+plugin repository.
 
 ### Why the CORE serves that channel
 

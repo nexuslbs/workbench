@@ -71,6 +71,13 @@ run-time input, the image is created ONCE and never changes:
   config, so the config can never leak into a layer;
 - credentials in it are references **by name** only (`${cred:NAME}`, `${env:VAR}`),
   never a value.
+- a source `ref` may be bumped on a LIVE process (edit the config, then
+  `workbench reconcile`): the loader re-imports the source's WHOLE module graph
+  under a fresh identity (entries and their relative helpers together) and
+  provisions the checkout's dependencies when they are missing, so no restart, no
+  image rebuild and no manual `npm ci` inside the cache volume are needed; a
+  failing install is a typed diagnostic naming the exact command. See the core
+  `README.md` -> "Changing a source `ref` on a LIVE process";
 
 `deploy/ci/deployment.config.yml` is the config the CI validation uses: NO core
 plugin source (the image is a core checkout and the core ships ZERO plugins)
